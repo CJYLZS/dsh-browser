@@ -10,7 +10,7 @@
  * Styles are inline: this plugin builds its client bundle outside the
  * repository's stylesheet pipeline, so a CSS import would have no owner.
  */
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
 import { en, type DshBrowserKey } from './locales.ts'
 
 /** Absolute path the host serves the mirror on. */
@@ -87,18 +87,40 @@ function buttonOf(button: number): 'left' | 'middle' | 'right' {
   return 'left'
 }
 
+/** Height of the address bar, which its pill radius is derived from. */
+const OMNIBOX_HEIGHT = 30
+
+/**
+ * The design tokens the address bar borrows, so it matches the app in either
+ * theme. `--dsw-alias-*` are the theme's own aliases: a layer for the field, a
+ * border for its edge, and label colours for the text and the icons.
+ */
 const style: Readonly<Record<string, CSSProperties>> = {
   root: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '6px', padding: '6px' },
-  bar: { display: 'flex', gap: '6px', alignItems: 'center', flex: '0 0 auto' },
-  input: {
-    flex: '1 1 auto', minWidth: 0, padding: '4px 6px', fontSize: '12px',
-    background: 'var(--dsh-input-background, #1b1f24)', color: 'inherit',
-    border: '1px solid var(--dsh-border, #333b44)', borderRadius: '4px',
+  omnibox: {
+    display: 'flex', alignItems: 'center', gap: '2px', flex: '0 0 auto',
+    height: `${String(OMNIBOX_HEIGHT)}px`, padding: '0 3px 0 9px',
+    borderRadius: `${String(OMNIBOX_HEIGHT / 2)}px`,
+    background: 'var(--dsw-alias-bg-layer-2, #22262c)',
+    border: '1px solid var(--dsw-alias-border-l2, #333b44)',
   },
-  button: {
-    padding: '4px 8px', fontSize: '12px', cursor: 'pointer',
-    background: 'var(--dsh-button-background, #2b6cb0)', color: '#fff',
-    border: 'none', borderRadius: '4px',
+  omniboxFocused: { borderColor: 'var(--dsw-alias-border-l4, #4a5560)' },
+  scheme: { display: 'flex', alignItems: 'center', flex: '0 0 auto', color: 'var(--dsw-alias-label-tertiary, #93a1b0)' },
+  schemeInsecure: { color: 'var(--dsw-alias-state-warn-label, #d19a66)' },
+  address: {
+    flex: '1 1 auto', minWidth: 0, height: '100%', padding: '0 4px',
+    border: 'none', outline: 'none', background: 'transparent',
+    color: 'var(--dsw-alias-label-primary, inherit)', font: 'inherit', fontSize: '12px',
+  },
+  iconButton: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto',
+    width: `${String(OMNIBOX_HEIGHT - 6)}px`, height: `${String(OMNIBOX_HEIGHT - 6)}px`,
+    padding: 0, border: 'none', borderRadius: '50%', cursor: 'pointer',
+    background: 'transparent', color: 'var(--dsw-alias-label-secondary, #93a1b0)',
+  },
+  iconButtonHovered: {
+    background: 'var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.08))',
+    color: 'var(--dsw-alias-label-primary, #fff)',
   },
   stage: { position: 'relative', flex: '1 1 auto', minHeight: 0, overflow: 'hidden', background: '#101418' },
   canvas: { display: 'block', width: '100%', height: '100%', objectFit: 'contain', outline: 'none' },
@@ -127,9 +149,85 @@ const style: Readonly<Record<string, CSSProperties>> = {
   },
   statusText: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   statusButton: {
-    flex: '0 0 auto', padding: '2px 6px', fontSize: '11px', cursor: 'pointer', borderRadius: '4px',
-    border: '1px solid var(--dsh-border, #333b44)', background: 'transparent', color: 'inherit',
+    flex: '0 0 auto', padding: '2px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: '10px',
+    border: '1px solid var(--dsw-alias-border-l2, #333b44)', background: 'transparent',
+    color: 'var(--dsw-alias-label-secondary, inherit)',
   },
+}
+
+/** The lock a secure address shows, drawn at the size the bar's icons share. */
+const LOCK_ICON = (
+  <>
+    <rect x="3.5" y="7" width="9" height="6.5" rx="2" />
+    <path d="M5.75 7V5.25a2.25 2.25 0 0 1 4.5 0V7" />
+  </>
+)
+
+/** The globe an insecure or empty address shows. */
+const GLOBE_ICON = (
+  <>
+    <circle cx="8" cy="8" r="5.25" />
+    <path d="M2.75 8h10.5M8 2.75c1.5 1.5 2.25 3.25 2.25 5.25S9.5 14.5 8 13.25C6.5 11.75 5.75 10 5.75 8S6.5 4.25 8 2.75Z" />
+  </>
+)
+
+/** The circular arrow a page that needs no navigation shows. */
+const RELOAD_ICON = (
+  <>
+    <path d="M12.75 8a4.75 4.75 0 1 1-1.4-3.36" />
+    <path d="M12.9 2.6v3.1h-3.1" />
+  </>
+)
+
+/** The arrow an edited address shows, which submits it. */
+const GO_ICON = (
+  <>
+    <path d="M3 8h9.5" />
+    <path d="M9 4.5 12.5 8 9 11.5" />
+  </>
+)
+
+/**
+ * One icon control inside the address bar.
+ *
+ * Hover is tracked in state rather than by a stylesheet: this plugin's client
+ * bundle has no stylesheet of its own, so every appearance here is an inline
+ * style, and a pseudo-class is not one.
+ * @param props - the icon, its accessible name, and what it does.
+ * @returns the button.
+ */
+function IconButton(props: {
+  readonly label: string
+  readonly icon: ReactNode
+  readonly onClick: () => void
+  readonly submit?: boolean
+}): ReactElement {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      type={props.submit === true ? 'submit' : 'button'}
+      aria-label={props.label}
+      title={props.label}
+      onClick={props.onClick}
+      onMouseEnter={() => { setHovered(true) }}
+      onMouseLeave={() => { setHovered(false) }}
+      style={{ ...style.iconButton, ...hovered ? style.iconButtonHovered : {} }}
+    >
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        {props.icon}
+      </svg>
+    </button>
+  )
 }
 
 /**
@@ -147,6 +245,7 @@ export function BrowserBody({ sessionId, t }: BrowserBodyProps): ReactNode {
   const [connected, setConnected] = useState(false)
   const [painted, setPainted] = useState(false)
   const [failure, setFailure] = useState<string | undefined>(undefined)
+  const [focused, setFocused] = useState(false)
 
   /**
    * Draw one received frame.
@@ -217,7 +316,23 @@ export function BrowserBody({ sessionId, t }: BrowserBodyProps): ReactNode {
     send({ type: 'input', message })
   }, [send])
 
+  /**
+   * Navigate to what the address bar holds.
+   *
+   * Both Enter and the arrow button land here, because an implicit form
+   * submission is not the only way this pane is asked to navigate and the two
+   * must not drift apart.
+   */
+  const submit = useCallback((): void => {
+    const target = address.trim()
+    if (target !== '') send({ type: 'navigate', url: target })
+  }, [address, send])
+
   const state = status?.state
+  const shownUrl = status?.url ?? ''
+  /** Whether the address bar holds something the browser is not on. */
+  const dirty = address.trim() !== '' && address !== shownUrl
+  const secure = shownUrl.startsWith('https://')
   const note = failure !== undefined
     ? failure
     : !connected
@@ -241,22 +356,54 @@ export function BrowserBody({ sessionId, t }: BrowserBodyProps): ReactNode {
   return (
     <div style={style.root}>
       <form
-        style={style.bar}
+        style={{ ...style.omnibox, ...focused ? style.omniboxFocused : {} }}
         onSubmit={(event) => {
           event.preventDefault()
-          if (address.trim() !== '') send({ type: 'navigate', url: address.trim() })
+          submit()
         }}
       >
+        <span
+          style={{ ...style.scheme, ...secure ? {} : style.schemeInsecure }}
+          title={secure ? copy('secure') : copy('insecure')}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            {secure ? LOCK_ICON : GLOBE_ICON}
+          </svg>
+        </span>
         <input
-          style={style.input}
+          style={style.address}
           value={address}
           placeholder={copy('address')}
+          spellCheck={false}
+          autoComplete="off"
+          aria-label={copy('address')}
+          onFocus={(event) => {
+            setFocused(true)
+            // A browser hands you the whole address to replace, not a caret in it.
+            event.currentTarget.select()
+          }}
+          onBlur={() => { setFocused(false) }}
           onChange={(event) => { setAddress(event.target.value) }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              submit()
+            }
+          }}
         />
-        <button type="submit" style={style.button}>{copy('go')}</button>
-        <button type="button" style={style.button} onClick={() => { send({ type: 'reload' }) }}>
-          {copy('reload')}
-        </button>
+        {dirty
+          ? <IconButton label={copy('go')} icon={GO_ICON} onClick={submit} submit />
+          : <IconButton label={copy('reload')} icon={RELOAD_ICON} onClick={() => { send({ type: 'reload' }) }} />}
       </form>
       <div style={style.stage}>
         <canvas
@@ -311,9 +458,10 @@ export function BrowserBody({ sessionId, t }: BrowserBodyProps): ReactNode {
         )}
       </div>
       <div style={style.status}>
+        {/* The address bar carries the page; this row carries what the address
+            bar cannot — which browser is behind it. */}
         <span style={style.statusText}>
-          {status?.debugPort === undefined ? '' : `${copy('endpoint')} 127.0.0.1:${status.debugPort} · `}
-          {status?.url ?? ''}
+          {status?.debugPort === undefined ? '' : `${copy('endpoint')} 127.0.0.1:${status.debugPort}`}
         </span>
         {live
           ? (
