@@ -560,6 +560,14 @@ README 与许可文本有一处对不上（README 说最新构建免费可试，
 
 实测（真实 UI）：暗色与亮色两套主题各截图确认；编辑态出现前往箭头、提交后变回刷新；回车成功导航到 example.com（画布取样 238,238,238）；悬停态计算样式 `rgba(38,49,72,0.06)` + 图标转 `label-primary`；明文地址显示琥珀地球。
 
+## README 与截图（2026-09-23）
+
+README 按 `dsh-remote-development` 的形状重写：双语标题行 + 首屏大图、Summary、Highlights、目录、`-----` 分隔的 Install / Usage / Understand the design / Configuration / Tools / Known Limitations and Deferred Work / Dev Note（含 Third-party code 小节）。中英各一套截图：`docs/img/preview_{en,zh}.png` 与 `settings_{en,zh}.png`，两套的场景相同、只有界面语言不同。
+
+截图取自真实运行：会话里只写一句自然语言（「打开 playwright.dev 这个网站，然后截一张图。」/ "Open playwright.dev and take a screenshot."），**不点名任何工具**，然后展开 agent 的执行过程（那一行 `N 次工具调用` 是可点的按钮，`aria-expanded` 才是状态；用类的近似选择器会点错），折叠左侧栏，整页截图。设置页截图裁到「自动化标记」那一行的下沿，避免把某行文字从中间切断。
+
+顺带修掉一个真缺陷：面板根容器写 `height: 100%` 又加 `padding: 6px`，而默认是 `content-box`，于是它比容器高 12px，底部的状态行与「关闭浏览器」被裁掉一截；地址栏同样的问题小一号（30px 加 1px 边框画成 32px）。两处都改成 `border-box`。
+
 ## 设置页的"生效"反馈（2026-09-23 补）
 
 问题：设置页只有"写入"，没有"生效"的证据——用户改完只看到自己填的值，分不清已保存和已生效。
