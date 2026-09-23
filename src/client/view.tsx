@@ -96,9 +96,16 @@ const OMNIBOX_HEIGHT = 30
  * border for its edge, and label colours for the text and the icons.
  */
 const style: Readonly<Record<string, CSSProperties>> = {
-  root: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: '6px', padding: '6px' },
+  // Both of these state a height and then add padding or a border to it, so they
+  // size to the border box: without that the pane is 12px taller than the box it
+  // is given and cuts off its own last row, and the address bar is 2px taller
+  // than the radius drawn on it.
+  root: {
+    boxSizing: 'border-box', display: 'flex', flexDirection: 'column',
+    height: '100%', minHeight: 0, gap: '6px', padding: '6px',
+  },
   omnibox: {
-    display: 'flex', alignItems: 'center', gap: '2px', flex: '0 0 auto',
+    boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: '2px', flex: '0 0 auto',
     height: `${String(OMNIBOX_HEIGHT)}px`, padding: '0 3px 0 9px',
     borderRadius: `${String(OMNIBOX_HEIGHT / 2)}px`,
     background: 'var(--dsw-alias-bg-layer-2, #22262c)',

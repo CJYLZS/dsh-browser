@@ -2,33 +2,38 @@
 
 [English](README.md) | 中文
 
-在 DSH 右侧栏里镜像一台**真实的本机浏览器**：agent 用工具驱动它，你直接看它、也能直接操作它，同时 DevTools 或另一个 Playwright 可以通过它自己的 CDP 端口附加进去。
+<img src="docs/img/preview_zh.png" alt="DeepSeek Harness 网页界面里的 dsh-browser：左侧是 agent 的浏览器工具调用，右侧栏镜像着同一台浏览器" width="100%">
 
-与 `ui-sidebar-browser`（那个把网页嵌在界面里的内嵌浏览器）不同，这个插件启动的是一个**独立浏览器进程**：有自己的 profile、自己的登录态、自己的 CDP 端口。两者互不干扰，可以并存。
+<p align="center">
+  <img src="docs/img/settings_zh.png" alt="浏览器设置页：每个会话一个正在运行的实例，各有自己的 CDP 端口，另含窗口模式、自动化标记与 profile 位置" width="45%">
+</p>
 
 ## 概述
 
-每个对话各有一台浏览器。在右侧栏打开「浏览器」标签，这个会话的 Chrome（或 Edge）进程就启动了；agent 的浏览器工具驱动的是同一个进程，而另一个对话看到的是另一台——不同的页面、不同的 cookie、不同的端口。会话之间什么都不共享，这正是设计的目的。
+这个插件给每个 DeepSeek Harness 对话一台**真实的本机浏览器**：Chrome 或 Edge 以独立进程运行，有自己的 profile、自己的 CDP 端口；agent 用六个工具驱动它，右侧栏镜像它，于是你能看着、也能直接操作同一批页面。会话之间什么都不共享——标签、cookie、端口都不共享。
+
+它不是内嵌的网页视图。页面跑在一个普通浏览器进程里，所以站点看到的是正常浏览器，镜像运行时 DevTools 或另一个 Playwright 可以附加进来，关掉 harness 也不会留下一个假装属于界面的浏览器进程。
 
 <a id="highlights"></a>
 ## 特点
 
-- **一个对话一台浏览器。** 两条路径都做了隔离：侧栏标签在 socket 上报出自己的会话，工具则按调用来源的会话解析浏览器。两个对话永远看不到对方的页面与标签。
-- **是真浏览器，不是嵌入的页面。** 独立的 Chrome/Edge 进程、真实的 profile，站点看到的就是真实浏览器；侧栏通过 CDP 镜像画面展示它。
-- **双向。** 侧栏里的点击、滚轮、输入会转发到真实页面；agent 的 `browser_click` / `browser_type` 派发的是可信的鼠标与文本事件，忽略合成 `element.click()` 的站点同样接受。
-- **可附加。** 同一台浏览器开放外部 CDP 端口，侧栏镜像的同时，`chrome://inspect`、另一个 Playwright 或 `scripts/cdp.mjs` 都能附加进去。
-- **工具少而精，以代码为主。** 6 个而不是 40 个：`browser_evaluate` 是主力，其余只补代码做不好的事——不写选择器就能读页面，以及可信输入。
+- **一个对话一台浏览器。** 两条路径都做了隔离：侧栏面板在它连接的 socket 上报出自己的会话，工具调用按调用来源的会话解析自己的浏览器。两个对话看不到对方的标签、页面与登录态。
+- **两个方向都是可信输入。** 侧栏里的点击与输入会转发到真实页面；agent 的 `browser_click` 与 `browser_type` 在元素自身的位置派发真实鼠标与文本事件——忽略合成 `element.click()` 的站点同样接受这些。
+- **可附加。** 每台浏览器都监听一个对外 CDP 端口，`chrome://inspect`、另一个 Playwright、或随仓库的 `scripts/cdp.mjs` 都能附加到侧栏正在镜像的那台浏览器。
+- **不写选择器也能读页面。** `browser_snapshot` 把页面的无障碍树打印成一行一个节点、每个节点带一个 `ref`，这既是 agent 读陌生页面的方式，也是它指名某个元素去点击的方式。
+- **工具少而精，以代码为主。** 六个而不是四十个：`browser_evaluate` 是主力，其余只补代码表达不了的语义——不先知道页面就能读它，以及必须可信的输入。
 
 ## 目录
 
 - [特点](#highlights)
 - [安装](#install)
 - [使用](#usage)
-- [理解设计](#design)
+- [理解设计](#understand-the-design)
 - [配置](#configuration)
 - [工具](#tools)
-- [已知限制](#limits)
-- [开发](#dev)
+- [已知限制与待办](#known-limitations-and-deferred-work)
+- [开发](#dev-note)
+  - [第三方代码](#third-party-code)
 
 -----
 
@@ -50,107 +55,114 @@ pnpm run build        # 产出 lib/index.js（host）与 lib/client.js（浏览�
 dsh plugin add --profile web link:/absolute/path/to/dsh-browser
 ```
 
-`link:` 安装把 profile 指向检出目录，之后 `pnpm run build` 的产物在下次重启 harness 时生效，不必重新 add。
-
-安装后重启 harness。
+`link:` 安装把 profile 指向检出目录，之后 `pnpm run build` 的产物在下次重启 harness 时生效，不必重新 add。两种方式装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
 
 <a id="usage"></a>
 ## 使用
 
-**看它、操作它。** 右侧栏点「新标签页」→「浏览器」。打开标签即启动该会话的浏览器，画面出现在里侧；地址栏回车即导航，在画面上点击、滚动、键入都会转发到真实页面。底部状态行显示这个会话的浏览器最终落在哪个 CDP 端口。
+三步，而且 agent 不需要任何额外交代：
 
-**让 agent 用它。** 浏览器工具在每个对话里都可用。让它"打开 example.com 并告诉我标题"，干活的正是侧栏显示的那台浏览器。
+1. **打开浏览器标签。** 在对话的右侧栏点「新标签页 → 浏览器」。这个会话的浏览器随即启动、画面出现；地址栏回车即导航，在画面上点击、滚动、键入都会转发到真实页面。
+2. **让它做事。** 「打开文档，告诉我安装那一节写了什么」就够了：工具作用于面板显示的那台浏览器，所以你能看着事情发生。
+3. **需要时接上自己的工具。** 浏览器运行时 `curl http://127.0.0.1:9333/json/version` 有响应；`chrome://inspect`、用 `chromium.connectOverCDP` 的另一个 Playwright、以及 `scripts/cdp.mjs` 都能附加进去。
 
-**用外部工具附加。**
+背后的机制是：面板只是一个比它更长命的浏览器的观察窗。关掉标签不会停掉浏览器——重新打开，页面还在；停掉它是面板状态行上的显式动作。浏览器也不是"一次请求一个"的资源：它在工具调用之间保持存活，这才让一个对话像是在"有一个浏览器"，而不是一连串页面加载。
 
-```sh
-curl http://127.0.0.1:9333/json/version     # 这个端口是否在监听
-```
+-----
 
-DevTools 里用 `chrome://inspect` 的 "Configure…" 添加 `127.0.0.1:9333`，或 `chromium.connectOverCDP('http://127.0.0.1:9333')`。`scripts/cdp.mjs` 是最小客户端（`list` / `inject` / `read` / `point` / `eval` / `goto`，用 `--port=` 指定某个会话的浏览器）。
-
-<a id="design"></a>
+<a id="understand-the-design"></a>
 ## 理解设计
 
-**浏览器属于对话。** 插件用 harness 的 session id 做一切索引：侧栏标签在 WebSocket 上报出会话，拿到该会话的浏览器；工具调用则按调用来源的会话解析。一个对话开三个标签仍然只有一台浏览器，其他对话看不到它。
+插件用 harness 的 session id 做一切索引，这一条决定解释了它的大部分行为：
 
-**侧栏标签是观察窗，不是资源。** 关掉它只是该 viewer 退订，浏览器继续运行——重新打开还在。要停止浏览器，用面板状态行上的「关闭浏览器」。浏览器在工具调用之间保持存活是刻意的：这才让一个对话像是在"有一个浏览器"，而不是一连串页面加载。
+- **两条互不相干的路径解析到同一个会话。** 侧栏面板注册在会话作用域的槽位里，于是它的注册工厂拿到 session id，并在 viewer socket 上报出它；工具调用没有面板，就从执行它的 agent 取会话（`exec.agent.id`，与 API 层恢复会话用的 `SessionId` 是同一个）。两条路径都够不到别的对话的浏览器；没有会话的调用（定时任务、没有会话的子代理）会直接失败，而不是落进某个人的浏览器。
+- **一个进程一个 profile。** Chrome 的 profile 目录被单个运行中的进程独占，所以配置里的 profile 目录是**父目录**：每个会话的浏览器在其中各有自己的子目录，子目录名用 harness 自己的会话 id 转义规则生成。由此而来的结果值得直说，因为它是隔离的代价：**登录态不跨会话共享。** 在一个对话里登录的站点，在另一个对话里是未登录状态。会话在重新打开时保持自己的身份，所以一个对话会回到它自己的 profile。
+- **端口是分配出来的，不是假设的。** `debugPort` 只是第一个候选。每台浏览器从它向上探一个真正能绑定的端口，并持有到退出——因为探测给出的答案在给出的那一刻就已经过期。`GET /dsh-browser/status` 报告每个会话最终落在哪个端口；任何地方都不应该假设就是配置里的那个数。
+- **镜像属于 CDP 会话，不属于面板。** `Page.startScreencast` 挂在某一个 CDP 会话上，而每一条"起一台浏览器"的路径——面板重启、崩溃恢复、改启动项——都会换掉那个会话。因此新起的浏览器一就绪，只要还有人在看就重新挂流；否则一次重启之后仍开着的面板会永远停在最后一帧，而它的状态行却一直在更新。
+- **浏览器死了会被换掉，而不是干等。** 关窗口或进程消失会把实例置为 `closed` 并带上原因、发布给面板，下一次请求就会起一台新的。没有任何情况需要手工修，包括浏览器进程恰好在两次工具调用之间死掉。
+- **快照是与模型之间的约定。** `Accessibility.getFullAXTree` 被打印成一行一个节点，被 Chrome 标记忽略的包装节点被丢掉，每个背后有 DOM 节点的行都带一个 `ref`。ref 只属于某一页的某一次快照：导航会让它们全部失效，而过期的 ref 会报错并指向 `browser_snapshot`，绝不会点到那个位置上现在的东西。
+- **点击是算出来的，不是猜的。** 一次点击把 ref 解析成 backend node id，把元素滚进视口，读它的 content quad，再把页面坐标换算成 CDP 派发输入所用的视口坐标；然后发出移动、按下、抬起三个事件——这正是它可信的原因。
+- **插件自己的路由自带信任检查。** viewer socket 与状态路由由本插件提供，而 webserver 的路由路径本身不做任何认证，所以两者都在应答之前先走 Connection 的拒绝逻辑（`isTrustedApiRequest` 与浏览器认证）。未认证的请求会得到 401。
+- **设置是用户覆盖，不是状态。** 设置页写入 harness 的 settings 文档，`cordis.yml` 里的条目始终是它下面的基础层；清空某项即删除覆盖。每个字段都改变浏览器的启动或编码方式，所以一次写入会重启正在运行的浏览器，面板会自行重连。
 
-**一个进程一个 profile。** Chrome 的 profile 目录被单个运行中的进程独占，所以每个会话的浏览器在配置的 profiles 目录下各有自己的子目录。由此带来的结果是刻意的，值得直说：**登录态不跨会话共享。** 在一个对话里登录的站点，在另一个对话里是未登录状态。
-
-**端口是分配出来的，不是假设的。** `debugPort` 只是第一个候选；每个会话的浏览器向上探一个空闲端口并持有到关闭。想知道哪个会话在哪个端口，读 `/dsh-browser/status`，不要假设就是配置里的那个数。
-
-**浏览器死了会被换掉，而不是干等。** 你关掉窗口或进程崩溃后，实例进入 `closed` 并带上原因，面板显示原因并提供「重启浏览器」，下一次工具调用也会自行起一台新的。
-
-**画面随重绘更新。** `Page.startScreencast` 是重绘驱动的，完全静止的页面几乎不出帧；侧栏保留最后一帧，这不是卡住。
+-----
 
 <a id="configuration"></a>
 ## 配置
 
-**设置页**：设置 → 「浏览器」，可视化改动窗口模式、自动化标记、profile、浏览器选择、页面尺寸、画质与 CDP 端口。顶部横幅读的是插件自己的 `GET /dsh-browser/status` 路由（设置页不属于任何会话，所以列出每个会话的浏览器），报告的是**真正在跑的实例**而不是当前配置——否则分不清"已保存"和"已生效"。
-
-设置页写入的是 harness 的 settings 文档（`~/.dsh/settings.yaml` 的 `dsh-browser` 命名空间），只记录**用户覆盖**：清空某项即回落到下面的组合配置，被覆盖的字段会显示「重置」按钮。
-
-`cordis.yml` 里的 `config` 是**基础层**，设置页的改动叠加在其上：
+设置页（设置 → 浏览器）编辑下表字段，并报告**真正在跑的东西**——这与"配置成什么"不是一回事：横幅列出每个会话的浏览器，以及它实际持有的端口、窗口模式与页面数。没有设置服务的部署什么都不注册，组合配置就是全部配置。
 
 | 字段 | 默认 | 说明 |
-|---|---|---|
-| `channel` | `chrome` | 驱动哪个已安装的浏览器（`chrome` / `msedge`） |
-| `executablePath` | 空 | 指定浏览器可执行文件；设置后忽略 `channel` |
-| `headless` | `true` | 无头模式。无窗口就没有遮挡与最小化问题，是推荐值 |
-| `stealth` | `true` | 关掉 Playwright 启动时带的两个自动化标记：加 `--disable-blink-features=AutomationControlled`（`navigator.webdriver` 变 false），并把无头 UA 里的 `Headless` 去掉。实测带标记时 Google 连续三次搜索全部被拦、关掉后三次全部通过；需要复现对照时可设 false |
-| `userDataDir` | 空 | 每会话 profile 的**父目录**；留空则每台浏览器用一次性的临时 profile |
-| `debugPort` | `9333` | CDP 端口的起点；每台浏览器从这里向上探 |
-| `viewportWidth` / `viewportHeight` | `1440` / `900` | **无头模式下的页面尺寸。** 无头没有真实窗口可取值，虚拟窗口远小于页面预期（实测 764×485，页面被裁切） |
-| `quality` | `70` | 镜像帧的 JPEG 质量 |
-| `maxWidth` / `maxHeight` | `1600` / `1200` | 镜像帧的最大边长 |
-| `everyNthFrame` | `1` | 每 N 帧镜像一帧 |
-| `snapshotNodes` | `300` | 一次 `browser_snapshot` 最多打印多少个无障碍树节点 |
-| `maxInstances` | `4` | 同时允许多少个会话浏览器；到顶时报错，而不是驱逐正在被看的浏览器 |
-| `startupUrl` | `about:blank` | 启动后首先打开的地址 |
-| `extraArgs` | `[]` | 追加的浏览器启动参数 |
+| --- | --- | --- |
+| `channel` | `chrome` | 驱动哪个已安装的浏览器：`chrome` 或 `msedge`。 |
+| `executablePath` | 空 | 显式指定浏览器可执行文件，用于 channel 查找不到的安装；设置后覆盖 `channel`。 |
+| `headless` | `true` | 无窗口运行。无头没有可被遮挡或最小化的东西，是推荐值。 |
+| `stealth` | `true` | 去掉 Playwright 启动的浏览器所带的两个标记：`navigator.webdriver`，以及无头时写成 `HeadlessChrome/…` 的 UA。 |
+| `userDataDir` | 空 | 每会话 profile 的父目录；留空则每台浏览器一个临时 profile，退出时删除。 |
+| `debugPort` | `9333` | 对外 CDP 端口的起点；每台浏览器从这里向上探。 |
+| `viewportWidth` / `viewportHeight` | `1440` / `900` | 无头模式下的页面尺寸——无头没有真实窗口可取值。 |
+| `quality` | `70` | 镜像帧的 JPEG 质量。 |
+| `maxWidth` / `maxHeight` | `1600` / `1200` | 镜像帧的最大边长（设备像素）。 |
+| `everyNthFrame` | `1` | 每 N 帧镜像一帧。 |
+| `snapshotNodes` | `300` | 一次 `browser_snapshot` 最多打印多少个无障碍树节点，超出会被截断并注明。 |
+| `maxInstances` | `4` | 同时允许多少个会话浏览器；到顶时请求报错，而不是驱逐正在被人看的浏览器。 |
+| `startupUrl` | `about:blank` | 浏览器启动后首先打开的地址。 |
+| `extraArgs` | `[]` | 追加的浏览器启动参数，接在插件自己的参数之后。 |
 
-没有挂 settings provider 的部署里，设置页不出现，配置就是 `cordis.yml` 里的值。
+`stealth` 默认开启，因为这是**测出来的**而不是假设的：带标记时 Google 连续三次搜索全部被拦，去掉后三次全部返回结果——包括用同样方式启动的真实 Edge 窗口，正是它说明决定因素是标记而不是浏览器。这个开关存在，是为了让那次对照可以复现。当真需要标记之外的手段时，`executablePath` 接受用户自备的任意 Chromium 二进制（含加固过的构建）；本插件不打包也不下载任何第三方二进制。
+
+-----
 
 <a id="tools"></a>
 ## 工具
 
 | 工具 | 作用 |
-|---|---|
-| `browser_navigate` | 打开地址；返回最终 URL、标题与标签列表 |
-| `browser_snapshot` | 把页面读成角色/名称/ref 的树（`- button "Sign in" [ref=e2]`），并附带标签列表 |
-| `browser_click` | 点击快照 ref 指名的元素，在它的位置上派发真实鼠标事件 |
-| `browser_type` | 向 ref 指名的元素输入（默认替换原内容），可再按一个键（如 Enter） |
-| `browser_screenshot` | 截取当前页面为 JPEG 并返回文件路径 |
-| `browser_evaluate` | 在页面里求值表达式——取值、滚动、等待、后退的通用工具 |
+| --- | --- |
+| `browser_navigate` | 打开地址；返回最终 URL、标题与标签列表。 |
+| `browser_snapshot` | 把页面读成角色、名称与 ref（`- button "Sign in" [ref=e2]`）；同样返回标签列表。 |
+| `browser_click` | 点击快照 ref 指名的元素，在它自己的位置派发真实鼠标事件。 |
+| `browser_type` | 向 ref 指名的元素输入（默认替换原内容），可再按一个键（如 Enter）。 |
+| `browser_screenshot` | 截取页面为 JPEG 文件并返回路径。 |
+| `browser_evaluate` | 在页面里求值 JavaScript 表达式：取值、滚动、等待、`history.back()`，以及任何用参数列表表达会更糟的事。 |
 
-ref 属于某一页的某一次快照：导航即失效，所以过期的 ref 会报错并指向 `browser_snapshot`，绝不会点到别的东西上。
+工具集刻意小，因为 `browser_evaluate` 就在那里：一个工具只有做到代码做不到的事才配得上自己的位置，而这里"做不到"指的是可信输入，以及不先知道选择器就能读页面。刻意没有的是 `back`/`forward`/`reload`（面板上有刷新，历史就是一句表达式）、悬停、拖拽、下拉、上传、下载——每一个都等到真有场景需要时再加，而不是先加上等场景。
 
-截图返回路径而不是内联图片：图片内容块需要附件服务签发的引用，插件无法自行构造，而当前适配器只允许 user 消息带图。用普通文件工具读取该文件即可。
+截图返回路径而不是内联图片：图片内容块需要附件服务签发的引用，插件无法自行构造，而当前适配器只允许 user 消息带图——所以截图落到磁盘上，模型用普通文件工具读它，这同时让这次捕获在会话日志里是持久的。
 
-没有会话的调用（定时任务、没有会话的子代理）会直接报错，不会落到别人的浏览器里。
+-----
 
-<a id="limits"></a>
-## 已知限制
+<a id="known-limitations-and-deferred-work"></a>
+## 已知限制与待办
 
-- **走 IME 的中文输入不工作。** 组合输入期间 `event.key` 是 `Process` 而不是单字符，键盘转发只处理单字符与少量命名键（Enter / Tab / 方向键等）。粘贴与直接键入 ASCII 正常。
-- **镜像跟随最新页面。** 打开新标签的链接、`window.open` 会把镜像与工具一起带过去；在浏览器窗口里手动开的标签不会。侧栏还没有多标签条（需要 0.1.7 的 `multiple` 槽位能力）。
-- **只在页面重绘时出帧。** 完全静止的页面几乎不出帧，侧栏保留最后一帧。
-- **最小化时不可交互。** 无头模式没有这个问题；带窗口时窗口被最小化会同时停掉画面与操作。
-- **只在 Windows 上验证过。** macOS / Linux 一次没跑过（`channel: 'chrome'` 的查找、临时目录、进程回收）。
+- **只在 Windows 上验证过。** macOS 与 Linux 一次没跑过：`channel` 的查找、临时目录、进程回收是最可能出差异的部分。
+- **还没在 0.1.7 上跑过。** 开发目标是 0.1.5-rc.2，peer 区间写的也是它，而 0.1.7 的预发布版不在这个区间内；各包版本也不齐（客户端包只到 `0.1.7-alpha.2`，host 包已有 `0.1.7-rc.1`），所以适配必须逐包钉版本。
+- **没有标签条。** 面板只显示一个页面：当前活动页。打开新标签的链接或 `window.open` 会把镜像与工具一起带到新页面，工具结果里也带标签摘要，但你无法在面板里手工切换页面。侧栏自己的多标签能力要等 0.1.7（槽位契约里的 `multiple`/`keepMounted`）。
+- **在浏览器窗口里手工开的标签不会被跟随。** 带窗口的浏览器里用它的标签条切页，镜像不会跟着走；只有插件被告知的页面（工具调用、页面自己发起的 `window.open`）才会移动它。
+- **侧栏里走 IME 的中文输入不工作。** 组合输入期间 `event.key` 是 `Process` 而不是单字符，键盘转发只处理单字符与少量命名键（Enter / Tab / 方向键等）。粘贴与直接键入 ASCII 不受影响；agent 的 `browser_type` 也不受影响，它插入文本而不是重放按键。
+- **只在页面重绘时出帧。** `Page.startScreencast` 是重绘驱动的，完全静止的页面几乎不出帧，面板保留最后一帧。这不是卡住。
+- **最小化时不可交互。** 无头模式不受影响，但被最小化的带窗口浏览器会同时停掉画面与输入。
+- **`maxInstances` 在面板上没有对应动作。** 到顶时工具调用会失败、新面板会被拒绝，错误信息里点名了这个上限，但面板没有提供释放一个槽位的操作；唯一办法是在某个面板里关掉浏览器，或者让那个会话被销毁。
+- **没有 profile 选择器。** 会话的 profile 由它的 id 推导，因此无法让这个对话指向一个已有的 Chrome profile，也没有可供选择的 profile 列表。
+- **不处理下载、上传、文件选择器与权限弹窗。** 这些发生在浏览器进程里，既没有呈现在面板上，也无法通过面板应答。
+- **不做请求拦截与网络检查。** 这个插件驱动浏览器，它不是代理；要做这类事请用附加的 CDP 端口。
+- **没有会话的调用会被拒绝。** 定时任务或没有自己会话的子代理会按设计失败；把它的调用算到别的对话的浏览器上，比失败更糟。
+- **截图不能变成图片内容块。** 见[工具](#tools)：它需要的那种附件引用在当前版本里不是插件能签发的东西。
+- **没有发布到 npm。** 从 GitHub 或本地检出安装——见[安装](#install)。
 
-<a id="dev"></a>
+-----
+
+<a id="dev-note"></a>
 ## 开发
 
-```sh
-pnpm run typecheck
-pnpm test                  # node --test（原生剥离类型，不用 tsx）
-pnpm run build
-node scripts/prove.mjs     # 前提实测：CDP 端口、screencast、输入派发、截图
-node scripts/modes.mjs     # headless / 带窗口 / 最小化 对照
-node scripts/cdp.mjs list  # 通过外部 CDP 端口读镜像浏览器
-```
+插件目录是自包含的 pnpm workspace（`packages: [- .]`、`storeDir: .pnpm-store`），因此 pnpm 够不到 harness 仓库的 workspace。dsh 框架包声明为 `peerDependencies`（`^0.1.5-rc.2`，由 host profile 提供），并在 `devDependencies` 里精确钉住，供本地类型与构建使用。
 
-`pnpm test` 跑单元测试：输入映射、坐标换算、screencast 的确认与终止顺序、配置校验、profile 目录转义、端口分配、实例池的隔离/上限/回收、无障碍树格式化，以及面板与工具两侧的会话解析。涉及浏览器的测试用 `test/support/` 里的记录型启动器，不需要真的 Chrome。
+命令：`pnpm run build`（tsdown，两半都产出）、`pnpm run typecheck`、`pnpm test`，以及 `scripts/` 下的实测脚本（`prove.mjs` 验证 CDP 端口、screencast、输入派发与截图；`modes.mjs` 对照无头/带窗口/最小化；`cdp.mjs` 通过对外端口读写一台运行中的浏览器，用 `--port=` 指定某个会话的）。
 
-`scripts/` 下是开发期用来验证前提的脚本，保留下来作为回归手段；`.prove/` 是它们的输出目录。
+`pnpm test` 跑在 Node 自己的 TypeScript 支持上（`node --test "test/**/*.test.ts"`），不依赖任何 loader——这同时是对源码的一条约束：enum、参数属性这类不可擦除语法跑不起来。涉及浏览器的行为用记录型启动器测试（`test/support/browser.ts` 发放假页面与假 CDP 会话），所以整个套件不需要 Chrome。而假件证明不了的部分——真实无障碍树的形状、真实点击的坐标空间、真实点击是否可信——都在真机上验证过一次，记在 `plan.txt` 的笔记里。
+
+构建产物 `lib/` 是提交进仓库的：改完源码必须重新构建并一起提交，否则从 GitHub 装的人拿到的是旧代码。
+
+<a id="third-party-code"></a>
+### 第三方代码
+
+没有打包任何第三方代码。`lib/index.js` 以运行时依赖的形式 import `playwright-core`（Apache-2.0）与 `ws`（MIT），`lib/client.js` 只需要宿主 shell 的平台模块——因此上游的安全更新通过用户自己的安装到达用户，而不是通过本仓库转发。插件也不附带浏览器：它通过 `playwright-core` 的 `channel` 查找驱动机器上已有的 Chrome 或 Edge，所以"捆绑浏览器"那种约 200MB 的下载不属于安装的一部分。
