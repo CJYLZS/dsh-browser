@@ -1,0 +1,570 @@
+## 目标
+
+在 `lib/dsh-browser` 建一个**外部 dsh 插件**（不进 harness 仓库，`lib/` 已被 gitignore）：给 agent 提供浏览器工具，并把本机 Chrome/Edge 的实时画面渲染到 Web 右栏；浏览器自身暴露 CDP 端口，可用 DevTools 或 Playwright `connectOverCDP` 附加调试；支持临时 profile 与长期 profile。
+
+已确认的选择：**playwright-core 驱动**、**默认 headful（可配置 headless）**、**先交付可运行骨架**。
+
+## 为什么不是 iframe
+
+真实 Chrome 窗口不是文档，无法 iframe；任意外部站点会被 `X-Frame-Options`/`frame-ancestors` 拒绝；即便 iframe 自己的页面，也不是 agent 那个浏览器进程与 profile。可行做法是 **CDP screencast 镜像**：`Page.startScreencast` 出 JPEG 帧 → 侧栏 `<canvas>` 渲染，用户鼠标/键盘经上行通道回传 `Input.dispatch*`。Playwright trace viewer、browserless 都是这个方案。
+
+## 已核实的接入点
+
+| 用途 | 机制 | 位置 |
+|---|---|---|
+| 右栏 tab | `ctx.sidebarRightTabs.register({id,kind,multiple,priority,title,guide})` | `packages/client/ui-sidebar-right/src/client/tab-registry.ts` |
+| tab 主体 | `ctx.slots.inject('sidebar.right.pane.tab', …)` | 同构范例 `packages/client/ui-sidebar-terminal/src/client/index.ts` |
+| profile 默认装配 | `web-app` 已装 `ui-sidebar-right` / `ui-sidebar-terminal` | `packages/bundle/web-app/cordis.patch.yml:240` |
+| WS 通道 | `ctx.inject(['webServer'])` → `registerUpgrade({path,handler})`，独占路径，二进制下行可用 | `packages/host/webserver/src/index.ts:176` |
+| 工具 | `ctx.tools.register(defineTool({...}))` | `docs/cookbook/adding-a-tool.md` |
+| 生命周期 | `ctx.on('agent/disposed')` / `'session/disposed'` | `packages/core/session/src/index.ts:63` |
+| 外部插件骨架 | 自带 pnpm workspace、tsdown 双构建（host ESM + client CJS factory）、`dsh.bundle.patch`、`dsh.client.inject` | 模板 `lib/dsh-remote-development` |
+| 安装 | `dsh plugin add --profile web link:<绝对路径>`，`pnpm run build` 后重启生效 | 同上 README |
+
+## 包结构
+
+```
+lib/dsh-browser/
+  package.json          name: dsh-browser（外部插件不入 @deepseek-ai scope）
+  pnpm-workspace.yaml   packages: [- .]，storeDir: .pnpm-store（与 harness 仓库隔离）
+  tsdown.config.ts      host: src/index.ts → ESM；client: src/client/index.ts → CJS factory
+  cordis.patch.yml      insert 一行插件
+  src/
+    index.ts            注入 ['tools','webServer']，装配 manager + tools + 视图路由
+    config.ts           Schema 配置：浏览器channel/可执行路径、profile 模式与目录、headless、调试端口、screencast 质量
+    browser/
+      launch.ts         发现并启动浏览器、创建持久化 context、解析实际 CDP 端口
+      manager.ts        按 Session 持有浏览器实例，响应 agent/disposed、session/disposed
+      screencast.ts     CDP screencast 会话，帧广播
+      input.ts          上行事件 → Input.dispatch*
+    tools/              M1：navigate / screenshot / evaluate
+    view/server.ts      WS upgrade 路由 + JSON 控制路由
+    client/
+      index.ts          注册 tab 类型、body 槽位、locale
+      view.tsx          canvas + 工具条；WS 客户端；输入转发
+      locales.ts / styles.ts
+```
+
+## M1 骨架（先跑通，再补全）
+
+**启动**：`chromium.launchPersistentContext(userDataDir, {...})`。浏览器选择用 `channel: 'chrome' | 'msedge'`（Playwright 自带发现），也支持显式 `executablePath`。临时 profile = `mkdtemp`，长期 profile = 配置目录。`headless: false` 为默认，`viewport: null` 保留真实窗口尺寸。启动参数带 `--remote-debugging-port=<port>`、`--no-first-run`、`--no-default-browser-check`。启动后读 `userDataDir/DevToolsActivePort` 拿到实际端口。
+
+**画面**：`context.newCDPSession(page)` → `Page.startScreencast({format:'jpeg', quality:70, maxWidth:1600, everyNthFrame:1})`，每帧 ACK `Page.screencastFrameAck`，帧广播给已连接的 WS 客户端。canvas 按缩放比适配，客户端把 CSS 坐标换算成视口坐标后再发送，避免动真实窗口大小。
+
+**输入**：`Input.dispatchMouseEvent`（move/pressed/released/wheel）、`Input.dispatchKeyEvent`（keyDown/keyUp/rawKeyDown/char）、`Input.insertText`。
+
+**WS 路由**：`registerUpgrade({path:'/dsh-browser/stream'})`，二进制 JPEG 下行、JSON 上行（attach / resize / 输入事件）。客户端从页面同源连 `ws(s)://${location.host}/dsh-browser/stream`。
+
+**安全（必须做）**：自定义路由不经过 gateway 的 trusted-host 拦截器，handler 必须自己判断信任——复用 `@deepseek-ai/dsh-client-connection` 的 `isTrustedApiRequest(request, trustedHosts)`（与 gateway 同一判据；若未公开导出则实现同一套 loopback/trustedHosts 规则）。否则 `host: 0.0.0.0` 时局域网任何人都能驱动本机浏览器。
+
+**客户端**：`register({id:'dsh-browser', kind:'browser', multiple:true, priority:'extension', ...})` + body 槽位渲染 canvas 与工具条（地址栏、后退/刷新、CDP 端口展示与复制）；`ctx.locale.register` 双语字典（客户端文案必须走 locale）。
+
+**工具**：`browser_navigate`、`browser_screenshot`、`browser_evaluate`，通过 `ctx.tools.register(defineTool(...))`。
+
+## M1 验证
+
+1. `pnpm install && pnpm run build` → `dsh plugin add --profile web link:D:/code/deepseek-harness/lib/dsh-browser` → 重启 harness。
+2. 右栏新建 browser tab，确认画面出现。
+3. 在真实窗口点链接，确认侧栏同步；在侧栏 canvas 点击/输入，确认真实窗口响应。
+4. `curl http://127.0.0.1:<port>/json/version` 确认 CDP 端口可用；外部 Playwright `connectOverCDP` 连上并读到同一页面。
+5. 让 agent 调 `browser_navigate`，确认侧栏跟随。
+6. 关闭会话，确认浏览器进程退出、临时 profile 目录清理。
+
+## M2 / M3 路线（骨架跑通后）
+
+**M2**：profile 管理（命名长期 profile + 设置卡片，参照 remote-development 的 `settings.section`）；工具补齐（click / type / press / scroll / wait_for / AX 快照 / tab 切换 / 上传下载）；每会话多实例与侧栏多 tab 对应；清理与错误提示完善。
+
+**M3**：与 `ctx.browserUse` 的关系（该槽位独占，需与 Playwright MCP 等共存策略）；e2e 与快照测试；双语 README 与文档。
+
+## 需要在实现中实测确认的点
+
+1. **最关键**：`launchPersistentContext` 自身带 `--remote-debugging-pipe`，我们额外传 `--remote-debugging-port=N` 时端口是否真的监听。M1 第一步就实测（读 `DevToolsActivePort` + 请求 `/json/version`）。若不成立，退化为「自建启动 + `connectOverCDP`」方案。
+2. 同一个 `user-data-dir` 被其他 Chrome 实例占用会导致启动失败——长期 profile 必须用插件专属目录，并给出明确错误而不是静默失败。
+3. screencast 的 `quality` / `maxWidth` / `everyNthFrame` 需要按实际帧率与带宽调参。
+4. 图片型工具结果的内容块注册方式（browser-use provider 已支持图片结果，实现时对齐）。
+5. `dsh.client.inject` 的基线模块表条目需与 web bundle 实际提供的表一致（照 remote-development 的清单核对）。
+
+## 对 harness 仓库的影响
+
+无。插件在 `lib/`（gitignore），不改 harness 任何文件；唯一耦合是 `dsh.client.inject` 声明的基线模块名与 peer 版本区间（对齐 `>=0.1.7-alpha.1 <0.2.0`，devDependencies 固定 `0.1.7-alpha.2`）。
+
+## 调研结论（本轮先做的验证）
+
+用内置浏览器做完一轮检索，**路线成立**，且三处关键不确定性已有权威结论：
+
+| 疑点 | 结论 | 证据 |
+|---|---|---|
+| Playwright 启动的浏览器能否额外开放调试端口 | **能**。传 `args: ['--remote-debugging-port=' + port]` 会真的开放端口，Playwright 继续用 pipe 控制 | [microsoft/playwright#20261](https://github.com/microsoft/playwright/issues/20261) 维护者 yury-s 答复 |
+| headful 模式下 screencast 是否可用 | **可用**。同构项目 `suleimansh/stream-headless` 用 `HEADFUL=1` 跑同一套 screencast 管线 | 该项目 README + 源码 |
+| screencast 的正确用法 | `Page.startScreencast {format:'jpeg', quality, maxWidth, maxHeight, everyNthFrame:1}`；帧 base64 解码后以**原始二进制**走 WebSocket；**每帧必须 `Page.screencastFrameAck`，否则 Chrome 停止发帧** | 同上源码；[nearai/ironclaw#2361](https://github.com/nearai/ironclaw/issues/2361) 亦确认 ACK 必需 |
+
+生态先例：Cloudflare Browser Run 的 CDP `/devtools` 端点、`htdangkhoa/headless-service`，均为"CDP 会话 + 持久浏览器"模式。
+
+### 调研翻出的新风险（影响 headful 默认这个选择）
+
+Chromium 把**被遮挡窗口里的前台标签当作后台标签**：停止渲染、节流 JS；窗口**最小化**时 CDP 命令整体冻结，且 `--disable-backgrounding-occluded-windows` / `--disable-renderer-backgrounding` / `--disable-background-timer-throttling` **均无效**（Puppeteer#4131、Chromium#40871660）。
+
+对方案的直接影响：侧栏视图最典型的使用场景——DSH 网页盖在 Chrome 上方——正是"遮挡"，不处理会导致画面卡死、agent 操作停滞。
+
+- **遮挡**：由 Chrome 官方 `chrome-flags-for-tools` 记载的 `--disable-features=CalculateNativeWinOcclusion` 解决（Windows 专属）。
+- **最小化**：无可靠解法，是硬限制，需要在 UI 上给出明确提示。
+
+因此默认 headful 保留，但**必须默认带上该 anti-occlusion 参数**，并在 README 与侧栏空状态里写明"请勿最小化浏览器窗口"；无人值守场景建议切 headless。
+
+---
+
+## 目标
+
+在 `lib/dsh-browser` 建一个**外部 dsh 插件**（`lib/` 已被 gitignore，不进 harness 仓库）：给 agent 提供浏览器工具，把本机 Chrome/Edge 的实时画面渲染到 Web 右栏；浏览器自身暴露 CDP 端口，可用 DevTools 或 Playwright `connectOverCDP` 附加调试；支持临时 profile 与长期 profile。
+
+已定选择：**playwright-core 驱动**、**默认 headful（可配置 headless）**、**先交付可运行骨架**。
+
+## 为什么不是 iframe
+
+真实 Chrome 窗口不是文档，无法 iframe；任意外部站点会被 `X-Frame-Options`/`frame-ancestors` 拒绝；即便 iframe 自己的页面，也不是 agent 那个浏览器进程与 profile。可行做法是 **CDP screencast 镜像**，已被上述实现验证。
+
+## 已核实的接入点
+
+| 用途 | 机制 | 位置 |
+|---|---|---|
+| 右栏 tab | `ctx.sidebarRightTabs.register({id,kind,multiple,priority,title,guide})` | `packages/client/ui-sidebar-right/src/client/tab-registry.ts` |
+| tab 主体 | `ctx.slots.inject('sidebar.right.pane.tab', …)` | 同构范例 `packages/client/ui-sidebar-terminal/src/client/index.ts` |
+| profile 默认装配 | `web-app` 已装 `ui-sidebar-right` / `ui-sidebar-terminal` | `packages/bundle/web-app/cordis.patch.yml:240` |
+| WS 通道 | `ctx.inject(['webServer'])` → `registerUpgrade({path,handler})`，独占路径 | `packages/host/webserver/src/index.ts:176` |
+| 工具 | `ctx.tools.register(defineTool({...}))` | `docs/cookbook/adding-a-tool.md` |
+| 生命周期 | `ctx.on('agent/disposed')` / `'session/disposed'` | `packages/core/session/src/index.ts:63` |
+| 外部插件骨架 | 自带 pnpm workspace、tsdown 双构建、`dsh.bundle.patch`、`dsh.client.inject` | 模板 `lib/dsh-remote-development` |
+| 安装 | `dsh plugin add --profile web link:<绝对路径>`，`pnpm run build` 后重启生效 | 同上 README |
+
+## 包结构
+
+```
+lib/dsh-browser/
+  package.json          name: dsh-browser（外部插件不入 @deepseek-ai scope）
+  pnpm-workspace.yaml   packages: [- .]，storeDir: .pnpm-store（与 harness 仓库隔离）
+  tsdown.config.ts      host: src/index.ts → ESM；client: src/client/index.ts → CJS factory
+  cordis.patch.yml      insert 一行插件
+  src/
+    index.ts            注入 ['tools','webServer']，装配 manager + tools + 视图路由
+    config.ts           Schema 配置：浏览器 channel/可执行路径、profile 模式与目录、headless、调试端口、screencast 质量
+    browser/
+      launch.ts         启动浏览器、创建持久化 context、解析实际 CDP 端口
+      manager.ts        按 Session 持有实例，响应 agent/disposed、session/disposed
+      screencast.ts     CDP screencast 会话（含强制 ACK），帧广播
+      input.ts          上行事件 → Input.dispatch*
+    tools/              M1：navigate / screenshot / evaluate
+    view/server.ts      WS upgrade 路由 + JSON 控制路由
+    client/
+      index.ts          注册 tab 类型、body 槽位、locale
+      view.tsx          canvas + 工具条；WS 客户端；输入转发
+      locales.ts / styles.ts
+```
+
+## M1 骨架
+
+**启动**：`chromium.launchPersistentContext(userDataDir, {...})`。浏览器选择用 `channel: 'chrome' | 'msedge'`，也支持显式 `executablePath`。临时 profile = `mkdtemp`，长期 profile = 配置目录。默认 `headless: false`、`viewport: null` 保留真实窗口尺寸。
+
+启动参数（含调研结论）：
+```
+--remote-debugging-port=<port>          # 外部 CDP / Playwright 附加
+--disable-features=CalculateNativeWinOcclusion   # 必须：否则被遮挡即停止渲染
+--no-first-run --no-default-browser-check
+```
+启动后读 `userDataDir/DevToolsActivePort` 拿到实际端口。
+
+**画面**：`context.newCDPSession(page)` → `Page.startScreencast({format:'jpeg', quality:70, maxWidth:1600, maxHeight:1200, everyNthFrame:1})`；每帧先 `Page.screencastFrameAck`（否则 Chrome 停发），再以原始二进制广播给已连接的 WS 客户端。无订阅者时停掉 screencast 省 CPU，有客户端时再启动（借鉴 ironclaw 的做法）。canvas 按缩放比适配，客户端把 CSS 坐标换算成视口坐标后发送，不改真实窗口大小。
+
+**输入**：`Input.dispatchMouseEvent`（move/pressed/released/wheel）、`Input.dispatchKeyEvent`（keyDown/keyUp/rawKeyDown/char）、`Input.insertText`。
+
+**WS 路由**：`registerUpgrade({path:'/dsh-browser/stream'})`，二进制 JPEG 下行、JSON 上行（attach / resize / 输入事件）。客户端从页面同源连 `ws(s)://${location.host}/dsh-browser/stream`。
+
+**安全（必须做）**：自定义路由不经过 gateway 的 trusted-host 拦截器，handler 必须自己判信任——复用 `@deepseek-ai/dsh-client-connection` 的 `isTrustedApiRequest(request, trustedHosts)`（与 gateway 同一判据；若未公开导出则实现同一套 loopback/trustedHosts 规则）。否则 `host: 0.0.0.0` 时局域网任何人都能驱动本机浏览器。
+
+**客户端**：`register({id:'dsh-browser', kind:'browser', multiple:true, priority:'extension', ...})` + body 槽位渲染 canvas 与工具条（地址栏、后退/刷新、CDP 端点展示与复制）；`ctx.locale.register` 双语字典；空状态提示"请勿最小化浏览器窗口"。
+
+**工具**：`browser_navigate`、`browser_screenshot`、`browser_evaluate`。
+
+## M1 验证
+
+1. `pnpm install && pnpm run build` → `dsh plugin add --profile web link:D:/code/deepseek-harness/lib/dsh-browser` → 重启 harness。
+2. 右栏新建 browser tab，确认画面出现。
+3. 在真实窗口点链接，确认侧栏同步；在侧栏 canvas 点击/输入，确认真实窗口响应。
+4. **遮挡场景实测**：把 DSH 网页盖到 Chrome 上方，确认画面仍在刷新（验证 anti-occlusion 参数生效）。
+5. `curl http://127.0.0.1:<port>/json/version` 确认 CDP 端口可用；外部 Playwright `connectOverCDP` 连上并读到同一页面。
+6. 让 agent 调 `browser_navigate`，确认侧栏跟随。
+7. 关闭会话，确认浏览器进程退出、临时 profile 目录清理。
+
+## M2 / M3
+
+**M2**：profile 管理（命名长期 profile + 设置卡片，参照 remote-development 的 `settings.section`）；工具补齐（click / type / press / scroll / wait_for / AX 快照 / tab 切换）；每会话多实例与侧栏多 tab 对应；最小化提示与自动恢复。
+
+**M3**：与 `ctx.browserUse` 的关系（该槽位独占，需与 Playwright MCP 等共存策略）；e2e 与快照测试；双语 README 与文档。
+
+## 仍需实测的点
+
+1. `launchPersistentContext` 传 `--remote-debugging-port=N` 后端口是否真的监听——虽有维护者答复，M1 第一步仍以 `/json/version` 实测确认。
+2. 同一 `user-data-dir` 被其他 Chrome 实例占用会导致启动失败——长期 profile 必须用插件专属目录，并给出明确错误而非静默失败。
+3. `quality` / `maxWidth` / `everyNthFrame` 需按实际帧率与带宽调参。
+4. 图片型工具结果的内容块注册方式（browser-use provider 已支持图片结果，实现时对齐）。
+5. `dsh.client.inject` 的基线模块表条目需与 web bundle 实际提供的表一致（照 remote-development 的清单核对）。
+
+## 对 harness 仓库的影响
+
+无。插件在 `lib/`（gitignore），不改 harness 任何文件；唯一耦合是 `dsh.client.inject` 声明的基线模块名与 peer 版本区间（对齐 `>=0.1.7-alpha.1 <0.2.0`，devDependencies 固定 `0.1.7-alpha.2`）。
+
+---
+
+# 实施记录（2026-09-23）
+
+## 决定：默认 headless
+
+headless 下 screencast 稳定 20fps、`Input.dispatch*` 生效、帧内容经人工确认是真实页面渲染。无窗口意味着遮挡与最小化这两个问题根本不存在。默认 `headless: true`，headful 保留为配置项（用于需要人工直接操作真实窗口的场景）。
+
+## 决定：tab kind 用 `cdpBrowser`，不占用 `browser`
+
+0.1.7 的 `@deepseek-ai/dsh-client-ui-sidebar-browser` 已占用 `BROWSER_KIND = "browser"`（web-app patch 第 253-254 行已装）。它是「iframe / Electron webview 把网页嵌在界面里」的路线：没有真实浏览器进程、没有 profile、没有 CDP 端口、没有 agent 工具。本插件用自己的 kind（`cdpBrowser`）与 id（`dsh-browser`），两者并存；接管能力保留但默认不动用。
+
+## 实测结论
+
+脚本 `scripts/prove.mjs`、`diagnose.mjs`、`occlusion.mjs`、`modes.mjs`、`cmdline.mjs`，证据在 `.prove/`。
+
+| 前提 | 结论 | 证据 |
+|---|---|---|
+| `--remote-debugging-port` 与 Playwright 自带的 `--remote-debugging-pipe` 共存 | 成立 | `/json/version` 返回 HTTP 200，`Browser=Chrome/153.0.8010.53` |
+| 端口发现方式 | 不能用 `DevToolsActivePort` | 有 pipe 时该文件不写；改为轮询 `/json/version` |
+| headless 渲染 | 成立 | 20fps，帧为真实页面（计数 80 + 按钮），输入生效，零 ACK 失败 |
+| headful 遮挡/最小化 | 不停流 | 最小化（人工确认窗口确实最小化）时 20.3fps |
+| 停流的真实原因 | **Playwright 默认参数，不是我们的 flag** | 命令行含 `--disable-backgrounding-occluded-windows`、`--disable-renderer-backgrounding`、`--disable-background-timer-throttling`；带/不带 `CalculateNativeWinOcclusion` 结果一致 |
+| `Input.dispatch*` 操控真实窗口 | 成立 | 点击后 `#out = "clicked 1"`；`Input.insertText` 落进输入框 |
+
+由此修正原计划的两处判断：
+
+- 原计划把遮挡/最小化列为最高 UX 风险并要求默认带 anti-occlusion 参数。实测中该参数不是起作用的一方，Playwright 默认已禁用后台化。参数仍可保留（无害，且在 headful 下有额外保险），但不应再作为默认 headful 的理由。
+- screencast 是重绘驱动的：完全没有画面变化时几乎不出帧。侧栏 canvas 保留最后一帧即可，不需要为此轮询。
+
+## 版本基线修正
+
+开发基线是 **0.1.5-rc.2**（仓库当前 checkout）。0.1.5-rc.2 上不存在的 API：`multiple`、`keepMounted`、`ctx.browserUse`、`ui-sidebar-browser`、`ui-sidebar-terminal`。计划中按 0.1.7 写的位置在 0.1.5 上的对应关系不同：`cordis.patch.yml` 的 `ui-sidebar-right` 在 224 行（不是 240），跨包注册 tab 的范例是 `ui-sidebar-documentpreview`（不是 `ui-sidebar-terminal`），tab 定义的 `title` 是函数、没有 `multiple`。
+
+## 其他实测修正
+
+- body 注册进 `sidebar.right.pane.tab` 时以 definition 的 **`id`** 为 key，不是 kind；title 另有 `sidebar.right.pane.tab.title` 槽位。
+- 0.1.5 的 page 类型是每个 kind 一个 tab（`pageAddress(kind)` 是固定地址），所以 M1 是单标签；多标签要等 0.1.7 的 `multiple`。
+- 信任检查用 `ctx.connection.requestRejection(req)`（gateway 自己在 `packages/api/gateway/src/index.ts:215` 就是这么做的），它等于 `isTrustedApiRequest → 403` 加浏览器鉴权 `→ 401` 两段。`webServer.register()` 的普通路由同样不过信任拦截，JSON 控制路由也要加。
+- 客户端 bundle 的 external 只能是 `PLATFORM_MODULES`（react 系列、cordis、client-store、ui-slots、ui-primitives、ui-dockkit），其余 `@deepseek-ai/*` 只能 type-only 导入，否则要内联。
+
+## M1 已完成并在真实 UI 里验证
+
+代码在 `src/`（host：config / browser/{launch,manager,screencast,input} / view/server / tools / index；client：definition / view / locales / index），`pnpm install && pnpm run build` 后经 `dsh plugin add --profile web link:...` 装入 web profile，重启 harness 生效。
+
+验证链路（全部在真实 UI 里跑通）：
+
+| 环节 | 证据 |
+|---|---|
+| tab 类型注册与双语文案 | guide 条目渲染出「浏览器 / 镜像本机真实浏览器，可操控，也可用同一端口附加 DevTools。」 |
+| 打开 tab 后自动起浏览器 | 侧栏状态行显示 `CDP 127.0.0.1:9333`，UA 为 `HeadlessChrome/153` |
+| 画面镜像 | canvas 解码出帧（764x485），内容是镜像进程加载的真实页面 |
+| 侧栏导航驱动镜像 | 地址栏提交后状态行变为目标 URL，镜像浏览器随之前往该地址 |
+| **侧栏点击驱动镜像** | 经外部 CDP 端口在镜像页注入全屏按钮，从 canvas 点击后按钮文本由 `off` 变为 `ON`，并由外部 CDP 独立读回确认 |
+| 外部附加（计划验收项 4） | 用独立进程通过 `/json/version`、`/json/list`、`Runtime.evaluate` 完整驱动该浏览器 |
+
+过程中修掉的真实缺陷：
+
+1. **坐标换算**：客户端送归一化坐标（0..1），而 CDP 需要 CSS 像素。原先直接把分数当像素传给 CDP，所有点击都会落在左上角。现由 manager 按 `Page.getLayoutMetrics` 的视口尺寸换算，并缓存 1 秒避免每次指针移动都往返一次。
+2. **错误被静默吞掉**：服务端把失败作为 `{type:'error'}` 回送，而客户端只处理 `status`，导致「点了没反应」无法解释。现已显示错误文本。
+3. **无头视口过小**：`viewport: null` 在没有真实窗口时取到的是虚拟窗口尺寸，实测仅 764x485，多数站点被裁切。现由 `viewportWidth` / `viewportHeight`（默认 1440x900）显式指定；headful 仍保留真实窗口尺寸。
+4. **letterbox 偏移**：canvas 用 `object-fit: contain` 把画面按比例居中放入元素盒，而坐标换算原先针对元素盒而非绘制区域，宽高比不一致时每次点击都会偏。现已按绘制区域换算并夹取到 `0..1`。
+
+真实站点验证：侧栏访问 `https://example.com/` 完整渲染（标题、正文、链接可读），按外部 CDP 给出的链接精确坐标点击后跳到 `https://www.iana.org/help/example-domains`，证明坐标换算在真实页面布局上准确。
+
+键盘与工具验证：
+
+- 侧栏画布逐键输入后，镜像页输入框的值变为 `hello world`（按键 → WS → host → CDP `Input.insertText`）。
+- 在一个新会话里让 agent 依次调用 `browser_navigate` 与 `browser_screenshot`：对话记录显示 2 次工具调用，返回 example.com 的 URL 与标题，并落盘一张 1440x900、17,318 字节的 JPEG。计划验收第 6 条通过。
+
+M1 收口。已知限制（写入 README）：IME 中文输入不工作（组合输入期间 `event.key` 是 `Process`）；一个进程一个浏览器实例，多标签/多会话共享；画面仅在重绘时更新；headful 下最小化会停。
+
+M2 的起点：按会话多实例（0.1.7 的 `multiple` 才有真正的多标签）、工具补齐（click / type / press / scroll / wait_for / AX 快照 / tab 切换）、profile 管理与设置卡片。
+
+## 设置页（提前于 M2 完成）
+
+设置 → 「浏览器」标签页，接入方式与 remote-development 的「远程开发」标签相同（`settings.section` 槽位），但持久化没有自己开路由，而是用 harness 的 settings 能力：
+
+- host：`ctx.inject(['settings'], …)` + `settings.installSection(ctx, 'dsh-browser', Config, entry, hooks)`。组合配置是 base 层，用户改动落在其上；`hooks.setSource` 给出当前权威值，`hooks.onChange` 触发重配。
+- client：`ctx.settingsScope.bind({ namespace: 'dsh-browser' })` 拿到 `SettingsScope`，`useSyncExternalStore` 订阅快照，`scope.set(field, value)` 写字段、`scope.unset(field)` 回落到组合值。覆盖过的字段显示「重置」。
+- 写入落在 `~/.dsh/settings.yaml` 的 `dsh-browser` 命名空间。provider 挂在 **base** bundle，所有 profile 都有；没有 provider 时页面不注册，配置等于组合值。
+
+可选字段：窗口模式（headless/headful）、profile（临时/长期目录）、浏览器（chrome/msedge）、可执行文件路径、CDP 端口、页面尺寸、镜像画质。
+
+manager 增加 `reconfigure(next)`：启动项变化即关闭浏览器（订阅者保留，下次取帧时按新值重启）；只有画面编码变化时原地重启流。
+
+实测：设置页渲染出全部控件与默认值；把 profile 改成长期目录并填路径后，`settings.yaml` 出现 `dsh-browser.userDataDir: C:\Users\rookie\dsh-browser-profile`，随后打开侧栏标签时该目录被创建并填充——设置 → 持久化 → 重配 → 用新 profile 启动，整条链路闭环。
+
+---
+
+# 设计：多标签页与页面生命周期（2026-09-23，本轮只设计不动手）
+
+## 根因：三个"标签页"被当成一个
+
+- **浏览器标签页** —— Playwright 的一个 `Page`，即真实 Chrome 窗口里的一条 tab。
+- **侧栏标签页** —— DSH 右栏的一个 tab。
+- **会话** —— 一个 workspace / 对话。
+
+现在的实现把三者合一：一个进程一个 browser、一个 `page`、一条 WS、一份 screencast。所以每个会话打开侧栏看到的都是同一个页面，每个会话的工具调用也都在动同一个页面。
+
+## 已核实的事实
+
+| 事实 | 位置 |
+|---|---|
+| 侧栏布局**按会话**（`SurfaceState` per session id，槽位 `scope: 'session'`） | `ui-sidebar-right/README.md` State |
+| session 作用域的 keyed 槽位，注册方 `inject` 工厂的第一个位置参数就是 `sessionId` | `ui-slots` 的 `InjectParams` |
+| 只有活动 tab 的 body 被挂载（`renderTab(active)`）；折叠侧栏时 panel 仍挂载，只是移出视口 | `ui-dockkit/.../TabPanel.tsx:410`、`ui-sidebar-right/.../SidebarRight.tsx:9` |
+| 0.1.5 的 page 类型地址是 `pageAddress(kind)`，**每格强制去重** | tab 注册契约 |
+| 0.1.7-alpha.2 新增 `multiple?: boolean`：为真时地址变成 `pageAddress(kind)/<uuid>`，每次打开都是独立实例；另有 `keepMounted` | 0.1.7 tarball `lib/client.js:6062`、`tab-registry.d.ts:84` |
+| 工具执行上下文能拿到会话：`exec.agent?.id`，而 `Agent.id: SessionId` | `packages/core/agent/src/types.ts:13-16` |
+| host 侧有 `session/disposed`，payload 是 `Session` | `packages/core/session/src/index.ts` |
+| **会话的 id 在 reopen / 恢复时保持不变**：打开已存在的对话走 `agents.resume({ resumeSessionId: sessionId })`，`persistence.open(id)` 用的就是这个 id | `packages/api/session-controller/src/agent.ts:430-466`、`packages/core/agent-loop/src/index.ts:857` |
+| 一个会话绑定一个 cwd（header.cwd 不符会抛 `ApiSessionCwdConflict`），而多个会话可以共用一个 cwd —— 所以 session 是比工作目录更细的单位 | `packages/api/session-controller/src/agent.ts:456` |
+
+## 决定一：按 session 隔离浏览器（每个 session 一个浏览器实例）
+
+隔离单位是 **session**（一次对话），不是工作目录：同一个工作目录下的两个对话各有各的浏览器，对话恢复后仍是它自己那一个。这与 ZCode 的行为一致。
+
+「按 session 隔离」只能是**每个 session 一个浏览器实例**（自己的进程、profile、cookie、CDP 端口、页集合）。原因不在 Playwright，在浏览器本身：同一个窗口里的标签共享 cookie jar，只有独立 profile 才隔离。所以"会话之间隔离登录态"和"共用一个窗口"不能同时成立，二选一。这一版按 session 隔离做：
+
+- **headful 下每个用过的 session 各有一个窗口**，这是本选择的直接后果；默认 headless 时没有窗口，代价不可见。之前设想的"一个窗口、标签按 session 归属"是共享 profile 的模型，作为备选保留（以后真需要再加作用域配置），现在不做。
+- **端口**：每个实例一个端口。不能用固定 9333，也不能用 `--remote-debugging-port=0`（Playwright 的 pipe 在场时 Chrome 不写 `DevToolsActivePort`）。启动前用 `net.createServer().listen(0)` 从 `debugPort` 起向上探一个空闲端口；设置页的 `debugPort` 因此是**基准端口**，并列出当前在跑的实例与它们各自实际用的端口。仓库里没有现成的空闲端口 helper。
+- **profile**：临时模式 `mkdtemp('dsh-browser-<sessionId>-')`；长期模式 `<userDataDir>/<sessionId>`。会话 id 在 reopen / 恢复时保持不变（见事实表），所以长期 profile 能跨对话重开保留登录态。
+- **生命周期**：懒启动——第一次工具调用或第一个 viewer 订阅时才起；`session/disposed` 关闭该实例并清临时 profile；配置 `maxSessions` 上限，超限关最久未用的；侧栏菜单加「关闭浏览器」。
+- **代价**：用过的 session 各留一个 Chrome 进程（headless 下不可见，headful 下每个用过的 session 一个窗口）；`debugPort` 从单值变成基准端口。
+
+## 决定二：一个会话内的多个浏览器标签页
+
+分两阶段，阶段 A 现在能做，而且它同时是阶段 B 的地基。
+
+**阶段 A（0.1.5）**：真实浏览器的标签条由 body 自己画（列表 + 切换 + `+` 新建 + `×` 关闭）。
+
+- 真相来源是 CDP 的 `Target.setDiscoverTargets`（`targetCreated` / `targetDestroyed` / `targetInfoChanged`），不是 Playwright 的 `context.on('page')`：前者带 `targetId`、`title`、`url`、`openerId`、`browserContextId`，正好既是标签条的列表、又能在标题/URL 变化时推送。`context.on('page')` 只用来拿可操作的 Playwright `Page` 对象，两者按 `targetId` 配对。浏览器级会话来自 `context.browser()?.newBrowserCDPSession()`（该 typings 里只在 Android/Electron 下返回 null）；退路是直接读我们已经持有的那个端口的 `/json/list`。
+- 一个浏览器只服务一个 session，所以**不再需要按 `openerId` 判定归属**——实例内的每条标签都属于这个 session。
+- 用 CDP 的 `targetId` 作 page 的稳定标识，不用自己 mint 的 id——外部 DevTools/Playwright 附加时看到的是同一个 id，两个世界对得上。
+- 侧栏里选中某条标签时同时 `Target.activateTarget`，让真实窗口跟着切过去；headful 下这是必须的，否则侧栏显示的和窗口显示的不是同一条。
+- 代价：这条标签条是我们自己画的，跟 harness 的 tab chip 不是一套（不能拖出去分屏）。
+
+**阶段 B（0.1.7）**：声明 `multiple: true`，让每个浏览器标签页可以在侧栏拥有自己的 tab（`openTab('cdpBrowser', { params: { target } })`），于是能拖到另一个格子里两个页面并排。需要新增 `SidebarRightTabParamsMap` 的 `cdpBrowser: { target: string }` 声明，body 从 `navigation.params` 读初始目标、`navigation.revision` 变化时切目标。`keepMounted: true` 能让切走再切回不重连，但折叠侧栏时 body 仍挂载，所以要按 `tab.visible` 主动暂停推流，否则后台一直在解码 JPEG。
+
+## 决定三：流的形状
+
+一条 WS 不再是"一个全局流"，而是"一个 viewer 对某个（会话，目标页）的订阅"。
+
+- WS URL 带上会话：`/dsh-browser/stream?session=<id>`，id 来自 body 注册时 `inject` 工厂拿到的 `sessionId`。
+- host 按 `(sessionId, targetId)` 维护 screencast：只有 ≥1 个 viewer 选中该目标时才开，最后一个离开就关——重绘驱动的成本只付给真正在看的人。
+- viewer → host 新增 `{type:'selectTab', targetId}`、`{type:'newTab'}`、`{type:'closeTab', targetId}`，其余不变。
+- host → viewer 新增 `{type:'tabs', tabs:[{id,title,url}], selected}`，页面增删或被别的来源改动时推送。
+
+## 决定四：关闭语义
+
+关键不对称：**侧栏标签是观察窗，浏览器标签才是资源**。关掉观察窗不该毁掉 agent 正在用的东西。
+
+| 事件 | 结果 | 理由 |
+|---|---|---|
+| 用户关掉侧栏的浏览器标签 | 浏览器不动，只有这个 viewer 退订 | 视图的寿命与资源的寿命不同 |
+| 任何人关掉某条浏览器标签（agent / 页面 `window.close` / 用户在真实标签条 Ctrl+W） | 该 session 的所有 viewer 收到新的 tabs 列表；选中它的人回落到当前活动页；没有页面可回落时提示「新建标签」 | 视图跟随真相；工具遇到已消失的 target 要报明确错误并列出可用 target |
+| 关掉这个浏览器里的最后一条标签 | 禁止（`×` 置灰），或关闭后立刻补一个 `about:blank` | Chrome 关掉最后一个 tab 会退出进程，而浏览器是 agent 的长驻资源 |
+| 用户关掉真实窗口（headful） | 只有**这个 session** 的浏览器进入 `closed`，viewer 显示「重新启动」；下一次工具调用或点击重新启动 | 每个 session 一个实例，爆炸半径就限定在它自己 |
+| `session/disposed` | 关闭该 session 的浏览器并清临时 profile | 资源跟着会话生命周期 |
+| 插件卸载 / harness 退出 | 关闭全部实例 | 同上 |
+| Web 页面刷新（侧栏布局是内存态） | 浏览器不动，侧栏回到收起态；再打开标签时接上同一个浏览器、同一批 page | 布局是视图状态，浏览器是资源 |
+
+## 工具侧对应
+
+- 工具加 `target?` 参数，缺省是"该会话当前活动页"。
+- 新增 `browser_tabs`（list / new / select / close），顺手回答"agent 怎么知道有哪些标签"。
+- `navigate` / `screenshot` / `evaluate` 的结果带上 `targetId` 与 tabs 摘要，让 agent 不必额外查一次。
+
+## 动工前必须实测
+
+1. 同一 Node 进程里并发两个 `launchPersistentContext`（不同 profile、不同 `--remote-debugging-port`）：两条都能起、两个端口都通、两条 screencast 互不干扰。这是"按 session 隔离"的地基。
+2. 同一 context 下多 page：每页一条 `context.newCDPSession(page)`；浏览器级 `newBrowserCDPSession()` 能起来，`Target.setDiscoverTargets` 能报出用户在真实窗口新建的标签及其 `openerId`。这是阶段 A 的地基。
+3. `Target.activateTarget` 能让真实窗口跟着侧栏切换标签（headful 下必须，否则侧栏显示的和窗口显示的不是同一条）。
+
+## 不做的事
+
+- 不把浏览器标签页 1:1 映射成侧栏标签页（0.1.5 做不到；0.1.7 作为可选增强，不是默认形态）。
+- 不做"一个窗口、标签按 session 归属"的共享 profile 模型。它更省资源、headful 下只有一个窗口，但会话之间共享 cookie，与"按 session 隔离"直接冲突。以后真需要再加作用域配置。
+
+---
+
+# 风控排查（2026-09-23）
+
+脚本 `scripts/risk.mjs`，证据在 `.prove/risk/`（每个配置一张截图）与 `.prove/risk.log`。
+
+## 受控对比（每种配置一个全新临时 profile，搜同一个词）
+
+| 配置 | webdriver | UA | 结果 |
+|---|---|---|---|
+| Edge 真实窗口（对照，用户说能正常搜） | true | Chrome/153 | **被拦**（`/sorry/index`，两次都拦） |
+| Chrome headless（插件当前默认） | true | **HeadlessChrome**/153 | 被拦 + recaptcha |
+| Chrome 真实窗口 | true | Chrome/153 | 被拦 + recaptcha |
+| Edge headless | true | Chrome/153 | 被拦 + recaptcha |
+| **Chrome headless + `--disable-blink-features=AutomationControlled` + 非 Headless UA** | **false** | Chrome/153.0.8010.53 | **通过，6 条结果** |
+| Edge 真实窗口（第二次） | true | Chrome/153 | 被拦 |
+| **纯 curl（完全没有浏览器）** | — | Chrome UA | **通过，3/3** |
+
+被拦页面自带说明："我们的系统检测到您的计算机网络中存在异常流量"，并打印了它看到的 IP。各次运行的出口 IPv6 都不同（`2602:fa4f:...` 下不同 /64）——这台机器走 TUN 代理且出口在轮换。
+
+## 读出来的结论
+
+**触发点是自动化标记，不是网络，也不是 headless。** 决定性的一轮 A/B（同样两条配置交替跑 3 轮，同一时间窗、同一网络，避开出口轮换带来的时间偏倚）：
+
+| 配置 | webdriver | UA | 通过 |
+|---|---|---|---|
+| 插件原默认（headless + 插件参数） | true | `HeadlessChrome/153` | **0/3**（三次全部 `/sorry/index`） |
+| 原默认 + `--disable-blink-features=AutomationControlled` + 非 Headless UA | false | `Chrome/153.0.8010.53` | **3/3**（每次 6 条结果） |
+
+前面那张表里"真实 Edge 窗口也被拦"不再矛盾：**Playwright 启动的浏览器一律带 `navigator.webdriver === true`，headful 也一样**，所以 headful 对照被拦不代表"真实浏览器也会被拦"——它只是"被 Playwright 启动的浏览器也会被拦"。纯 curl 能过，正是因为它根本没有这个标记。headless 只是额外多带了一个 `HeadlessChrome` UA。
+
+## 落地与验证
+
+配置项 `stealth`（默认 `true`）：launch 时加 `--disable-blink-features=AutomationControlled`；页面第一条请求之前用 CDP `Network.setUserAgentOverride` 把 `HeadlessChrome` 去掉——值取自页面自己报的 UA，只删 `Headless` 一词，不猜版本号。改 `stealth` 会重启浏览器（已并入 `LAUNCH_FIELDS`）。
+
+在**真实的 DSH 浏览器**里验证（侧栏画布点击 + 输入，走插件自己的 WS → CDP 输入链路，不是脚本直连）：
+
+| 序号 | 查询 | 结果 |
+|---|---|---|
+| 1 | `playwrightplaywright browser testing` | 9 条结果，无 `/sorry/` |
+| 2 | `typescript compiler` | 9 条结果，无 `/sorry/` |
+| 3 | `vite build config` | 7 条结果，无 `/sorry/` |
+
+同时读回的指纹：`navigator.webdriver === false`，UA 里已无 `Headless`（第 1 条的查询词重复是我第一次尝试用 `cua.type` 输入时留下的残留，不影响结论）。
+
+## 关于 CloakBrowser（评估结论：不换）
+
+`CloakHQ/CloakBrowser`，31.6k star / 2.6k fork / 315 commit，最后一次提交 2026-09-18；Python 40% / C# 29.7% / TS 28.7%。它是**在 C++ 源码层打了 87 个补丁的 Chromium 二进制**（canvas / WebGL / 音频 / 字体 / GPU / 屏幕 / WebRTC / 网络时序 / 自动化信号 / CDP 输入行为），并且是 Playwright 的 drop-in 替代（`launch()` 之后就是普通的 Playwright browser），支持 `launch_persistent_context`、代理、geoip、humanize。它打的确实是这次被拦的那一类信号——但同样的信号两个 flag 就关掉了，不值得为它引入下面的代价。
+
+不换的三个理由：
+
+- **许可**（`BINARY-LICENSE.md` v1.3）：wrapper 是 MIT，但**二进制是专有**的；"最新大版本需要付费订阅"，免费额度是**1 个并发会话**；并且明确禁止 redistribute / "include it in any product or service distributed to third parties"。我们的插件是要分发给别人用的，这一条直接挡死；而且按 session 隔离的设计天然需要多个并发浏览器，免费额度也不够。
+- **不需要**：两个 flag 已经把 webdriver 与非 Headless UA 都关掉了，A/B 证明这就够了。
+- **代价**：首次运行要下载约 200MB 的第三方专有二进制 + 需要 license key 与账号，对本地开发工具来说是很重的一层信任与运维依赖。
+
+保留的可能性：插件的 `executablePath` 已经能把浏览器换成任意 Chromium 二进制，所以"用户自己装了 CloakBrowser，把路径填进设置页"这条路**不需要写任何集成代码**，也不需要我们把二进制打包进去。真到需要二进制级隐身时走这条路。
+
+README 与许可文本有一处对不上（README 说最新构建免费可试，许可说最新大版本需要付费订阅），以许可文本为准，真要采用前先确认。
+
+## 仍未验证的
+
+- 出口 IP 确实在轮换（每次运行的 IPv6 都不同），但既然同一时间窗内两组配置能跑出 0/3 与 3/3，网络不是这次的触发因素。
+- `navigator.webdriver` 是服务端无法直接看到的，所以 Google 到底读了什么（CDP 输入行为？请求特征？）还没有定论；能确定的只是"关掉这两个标记后不再被拦"。`stealth` 关掉后可在设置页复现这个对照。
+---
+
+# 发布前清单（2026-09-23 梳理）
+
+## 已完成
+
+镜像与操控（screencast → WS → canvas，归一化坐标 + letterbox 换算 + 视口缩放）、侧栏集成（kind `cdpBrowser`、guide 条目、双语文案、地址栏 / 刷新 / 状态行）、对外 CDP 端口、3 个 agent 工具（navigate / screenshot / evaluate）、设置页（8 个字段，走 harness settings 能力，持久化 + 即时重配）、启动配置（headless/headful、chrome/msedge/自定义路径、临时/长期 profile、视口、画质、追加参数）、stealth、README / AGENTS.md / plan.txt。
+
+## A. 现在是坏的（不是缺功能）
+
+1. **浏览器断开无人观察。** 全插件只有一处 `close` 监听，在 viewer 的 WebSocket 上（`src/view/server.ts:81`）；`context.on('close')`、`browser.on('disconnected')`、`isConnected()` 一个都没有。用户关掉真实窗口或浏览器崩溃后：`state` 永远停在 `ready`，`ensure()` 早退，面板停在最后一帧且没有任何提示，此后每次工具调用都抛 Playwright 的原始英文错误，**也没有任何恢复路径**（连面板的「刷新」都走同一条 `ensure()`）。
+2. **新标签失控。** `window.open` / `target=_blank` / 用户在真实窗口 Ctrl+T 都会在同一浏览器里新建 page；manager 只持有 `pages()[0]`、只为它建 CDP 会话，没有 `context.on('page')`。实测：新标签出现后 `/json/list` 里有两条 page target，插件仍只驱动第一条，镜像不跟随、面板不显示、agent 不知道它存在。一条 `target=_blank` 链接就足以让 agent 在旧页面上打转。
+3. **失败态在 UI 不可见。** `view.tsx` 的提示是 `painted ? undefined : …`，画过第一帧之后 `note` 恒为 undefined；而 `failure` 只在收到 `{type:'error'}` 时设置，浏览器死亡只发 status。结果是"画面卡住 + 没有任何说明"。
+
+## B. 工具不足以真的用起来
+
+4. 只有 3 个工具，缺 click / type / press / scroll / wait_for / tabs（list/switch/new/close）。没有它们，agent 每次点击都在手写 `browser_evaluate` 脚本——贵且脆。
+5. 截图返回文件路径而不是图片内容块。实现注释说插件无法自己造 attachment；需要确认 dsh 是否给了插件产出图片块的途径（browser-use 已支持图片结果）。有就应该用。
+
+## C. 发布工程
+
+6. **插件不在版本控制里。** `git rev-parse --show-toplevel` 给出的是 harness 根，而 harness 忽略 `lib/`——目前没有仓库可装，也没有历史。
+7. `private: true`，缺 `license` / `repository` / `author`。
+8. `lib/` 必须随仓库提交。对照 `dsh-remote-development`：从 GitHub 装、无 `prepare` 脚本、`files: ["lib","cordis.patch.yml","THIRD-PARTY-NOTICES.md"]`。
+9. **零测试。** `scripts/*.mjs` 都要真浏览器 / 真网络，不能当回归。对照件有 `"test": "tsx --test test/*.test.ts"`。
+10. README 只有中文；对照件是英文 `README.md` + `README.zh.md`。
+11. 没有 LICENSE 文件。
+12. `peerDependencies` 写 `^0.1.5-rc.2`，且从未在 0.1.7 上跑过。
+
+## v1 实施记录（2026-09-23，正确性与功能部分已按 TDD 完成）
+
+一次复核曾列出三处问题，现在都已解决，写法与原计划有两处不同：
+
+- 面板没有加「关闭浏览器」的标签菜单项（`sidebar.right.tab.menu.item`），而是放在面板自己的状态行里（运行中才出现，另有一个「重启浏览器」覆盖停止/失败态）。理由：标签菜单要按 tab 类型过滤，而这两个动作是"这个会话的浏览器"的动作，放在看着它的那个面板里更直接、也不必区分是哪个 tab 的菜单。
+- 断开的观察只用 `context.on('close')`，没有接 `browser().on('disconnected')`：Playwright 的断开事件不带原因，两条路径的结论都是同一句话。
+
+### 一、正确性
+
+**1. 按 session 隔离（已完成）。** 结构：`BrowserPool`（按 session id 持有实例）+ `SessionBrowser`（原先的 `BrowserManager`，现在只服务一个会话）。
+
+- 端口：`debugPort` 是基准，`PortAllocator` 从基准向上探一个能绑定的端口并**持有**它直到浏览器关闭（探测本身有竞态，所以分配是串行的，且分配出去就算占用）。
+- profile：`userDataDir` 变成父目录，每会话一个子目录；段名用 harness 自己的转义规则（`session-persistence-jsonl` 的 `encodeSegment`），所以 `..`、分隔符、超长 id 都不会造成越界或碰撞。
+- 面板：会话作用域的 keyed 槽位，注册方的 `inject` 工厂拿到 `sessionId`，WS 用 `?session=<id>` 指名要看哪个浏览器。
+- 工具：`exec.agent?.id` 定位实例；没有 session 的调用直接报错，不会落到别人的浏览器。
+- 回收：`session/disposed` 关掉该会话的实例；`maxInstances`（默认 4）到顶时**报错**而不是驱逐正在被看的浏览器。
+- 设置页的 profile 文案已改成"每会话一个子目录"，`/dsh-browser/status` 改成实例列表。
+
+**实测（两个真实会话，同一台机器）：** 会话 A 面板 9333 / 会话 B 面板 9334，各自 `about:blank`。通过外部 CDP 端口把 B 导航到 `https://example.com/`：B 的面板跟随，A 的面板与实例仍是 `about:blank`。随后在 B 里让 agent 调用 `browser_evaluate('location.href')`，返回 `"https://example.com/"`——工具驱动的正是面板所看的那个实例，两个方向都指向同一个 session。
+
+**2. 断开观察（已完成）。** `context.on('close')` 且不是自己发起的关闭 → `forget()` + `closed` + 原因（Playwright 不提供原因，固定为 "the browser was closed or crashed"）。`ensure()` 不再在 `ready` 时早退——死掉的实例会在下一次请求（工具调用、面板重连、面板上的「重启浏览器」）时被换掉。
+
+**实测：** 杀掉 9334 的进程（面板未挂载）→ 实例变 `closed` 并带原因，9333 不受影响；面板挂着时杀掉 → 面板显示"浏览器已停止。 the browser was closed or crashed" + 「重启浏览器」，点一下即恢复（端口也回到 9334）。顺带修掉一个真问题：提示是浅灰字浮在画面上，白底页面里看不见，现在带了半透明深色卡片。
+
+**3. 新标签跟随之（已完成）。** `context.on('page')` → 新页面成为激活页（镜像与工具都切过去），激活页关闭时退到剩下的第一个，没有就新建一个。`navigate` / `snapshot` 的结果都带标签摘要（`[active] url`），所以 agent 能看到页面换了。
+
+### 二、功能
+
+**4. 工具补齐到 6 个（已完成）。** 新增 `browser_snapshot`（ARIA 树 + ref）、`browser_click`（ref → `DOM.getContentQuads` → 真实鼠标事件）、`browser_type`（`DOM.focus` + `Input.insertText` + 可选按键）。ref 只在当前页有效，导航即失效，失效时报错并指向 `browser_snapshot`。
+
+**实测：** 让 agent 走一遍 navigate → snapshot → click：snapshot 在前几行给出 `- RootWebArea "Example Domain" [ref=e1]`、`- heading "Example Domain" [ref=e2]`，用 `ref=e7` 点击 "Learn more" 后页面真的跳到 `https://www.iana.org/help/example-domains`，面板同步显示该地址——说明坐标换算（content quad 是页面坐标，输入是视口坐标）在真实 Chrome 上是对的。
+
+**5. 截图仍是文件路径（已确认，无需改）。** `ImageBlock` 要的是 `ImageAttachmentRef`（"owned by the attachment service"），插件无法自行签发；而且 `packages/llm/llm/src/types.ts:71` 写明只有 user 消息可以带图，工具结果这条路径在当前适配器下用不了。留给 0.1.7 之后的 `browser-use` 图片结果能力。
+
+### 三、发布工程（未完成）
+
+6. **建独立仓库**——`lib/dsh-browser` 仍不在任何版本控制里（`git rev-parse --show-toplevel` 是 harness 根，而 harness 忽略 `lib/`）。按 `dsh-remote-development` 的形状：`lib/` 入库、`files`、`license: MIT`、`repository`、双语 README（英文主 + `README.zh.md`）、LICENSE 文件、`test` 脚本。安装说明也要重写。
+7. 去掉 `private: true`。
+8. 测试集：已完成（`node --test`，不用 tsx——Node 24 原生剥离类型即可跑 `.ts`），当前 78 个用例，覆盖输入映射、坐标换算、screencast 确认/终止顺序、配置校验、profile 段名转义、端口分配、池的隔离/上限/回收/重启、AX 树格式化、面板与工具的两个方向。仍缺：真实浏览器上的 `browser_type`、`maxInstances` 到顶时的面板提示。
+9. 在 0.1.7 上跑一遍（`multiple` / `keepMounted` 都在那边），定下 peer 区间。
+10. **跨平台未验证**：整个开发都在 Windows 上，macOS / Linux 一次没跑过（`channel: 'chrome'` 的查找、临时目录、进程回收）。
+
+### 还需要你定的
+
+- 发布形式：GitHub 安装（跟 remote-development 一样）还是 npm。
+- 跨平台进不进 v1，还是先只声明 Windows。
+- 长期 profile 的粒度：按会话（已按此实现）还是全局一份——后者会让登录态跨会话共享，与"真实隔离"矛盾。
+
+## 设置页的"生效"反馈（2026-09-23 补）
+
+问题：设置页只有"写入"，没有"生效"的证据——用户改完只看到自己填的值，分不清已保存和已生效。
+
+结果：设置页顶部加一条**浏览器状态**，数据来自插件自己的 `GET /dsh-browser/status` 路由（和 viewer 一样走 `requestRejection` 信任检查；无凭据访问实测返回 401，说明路由不是敞开的）。状态取自正在跑的那个实例而不是当前配置，所以"待重启"时不会报出没在跑的浏览器的模式。每次写入后 1.5s / 4s / 8s 各重读一次，另配「刷新」按钮与「已保存」「保存失败」提示。
+
+实测（真实 UI，改的是 CDP 端口这个启动项，会真的重启浏览器）：
+
+| 操作 | 横幅 |
+|---|---|
+| 起始 | 浏览器运行中 CDP 127.0.0.1:9333 · headless |
+| 端口改成 9334 | 浏览器运行中 CDP 127.0.0.1:9334 · headless |
+| 点该行的「重置」 | 浏览器运行中 CDP 127.0.0.1:9333 · headless |
+
+中途发现并修掉的一个真缺陷：**「重置」走的是 `scope.unset`，没有接上重读**，所以重置后横幅仍显示上一个浏览器的端口（浏览器其实已经重启正确）。现在重置和写入走同一个 `commit()`。
+
+顺带确认一件事：**纯客户端改动不需要重启 harness**，浏览器里重载页面即可（host 侧改动仍要重启）。`scripts/cdp.mjs` 增加了 `eval <expression>` 子命令，用来从宿主机读镜像页的状态。
+
+`stealth` 也进了设置页（自动化标记：隐藏 / 保留），默认隐藏。
+
+## 工具集（2026-09-23 定）
+
+原则：以 ZCode 内置浏览器能力为参照，只保留必要工具，**以代码工具为主**（evaluate 是主力，工具是那些代码做不好或做不对的事）。
+
+| 工具 | 为什么必要 |
+|---|---|
+| `browser_navigate` | 已有。唯一的导航入口 |
+| `browser_snapshot` | 新增。返回 ARIA/AX 树（ZCode 的主读法：`domSnapshot`）。这是"不写代码也能看懂页面"的唯一途径，也是给 click/type 提供稳定坐标（ref/选择器）的来源 |
+| `browser_click` | 新增。按 ref/选择器点击，走插件已有的 CDP 输入通道，是**真实**鼠标事件；`evaluate` 里的 `element.click()` 不是可信事件，会被部分站点忽略 |
+| `browser_type` | 新增。按 ref/选择器输入，走真实按键（`Input.insertText`）；`key` 参数覆盖 Enter/Tab 这类提交键 |
+| `browser_screenshot` | 已有。视觉判断（布局、图表、canvas）没有代码替代品 |
+| `browser_evaluate` | 已有。主力与兜底：取值、跑逻辑、滚动、`history.back()`、等待条件…… |
+
+明确**不做**的（用 evaluate 或上面六个覆盖）：back/forward/reload（reload 在面板上有，back 用 `history.back()`）、hover/drag/select/upload/download（各自只在真需要时再加）、`wait_for`（轮询写在 evaluate 里更灵活）、hover 相关的悬停菜单（真遇到再加）。新标签页不单独给工具：插件跟随新页面并把标签摘要放进 navigate/snapshot 的结果里，等确有需要再加 `browser_tabs`。
+
+理由：ZCode 的面很宽（约 40 个成员）是因为它是给模型直接写 Playwright 用的 SDK；DSH 这边有 `browser_evaluate`，等价能力用代码表达即可，工具只补代码表达不了的语义（可信输入、ARIA 读取）。

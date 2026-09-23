@@ -1,0 +1,3 @@
+# Normalize line endings to LF in the repository: the sources are LF, and the
+# scripts and sources are read on Windows and elsewhere alike.
+* text=auto eol=lf

@@ -1,0 +1,12 @@
+# Standalone workspace boundary: pnpm stops its upward workspace search here,
+# so the plugin is managed independently of the dsh checkout it lives inside.
+packages:
+  - .
+
+# Keep the store inside the project (no writes outside the plugin directory).
+storeDir: .pnpm-store
+
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/cordis@4.0.4'
+  - '@deepseek-ai/cosmokit@1.8.5'
+  - '@deepseek-ai/schemastery@3.18.4'

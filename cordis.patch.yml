@@ -1,0 +1,13 @@
+# dsh-browser bundle patch: inserts this plugin into a profile's layer stack.
+#
+# The plugin is ONE row. Its apply() mounts the browser manager, the tools, and
+# the screencast route together; there is no base row to replace, because the
+# capability (driving a real local Chrome and mirroring it into the right
+# Sidebar) does not exist in the harness.
+#
+# The tab type registers under its own kind rather than taking over `browser`:
+# a later harness ships `ui-sidebar-browser` under that kind, and that tab
+# renders pages inside the app while this one mirrors a separate process.
+- insert:
+    - id: dsh-browser
+      name: 'dsh-browser'
