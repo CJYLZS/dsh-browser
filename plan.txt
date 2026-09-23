@@ -510,6 +510,10 @@ README 与许可文本有一处对不上（README 说最新构建免费可试，
 
 **3. 新标签跟随之（已完成）。** `context.on('page')` → 新页面成为激活页（镜像与工具都切过去），激活页关闭时退到剩下的第一个，没有就新建一个。`navigate` / `snapshot` 的结果都带标签摘要（`[active] url`），所以 agent 能看到页面换了。
 
+**实测发现并修掉的缺陷：换浏览器后 viewer 永远收不到帧（2026-09-23）。** 用户报告：agent 调用工具时侧栏始终白屏，工具本身正常。定位：状态通道是活的（面板地址栏跟着更新），但 screencast 死了——`Page.startScreencast` 属于**某一个 CDP 会话**，而重启/崩溃恢复/改启动项都会换掉浏览器与它的 CDP 会话；仍在订阅的 viewer 只能靠"0→1 订阅"时的 `openStreamForViewers()` 挂流，于是只要面板没被卸载重挂，画面就永远停在上一帧。我之前的验证之所以没发现：每次都先切走再切回（正好触发了 0→1）。
+
+修法：`start()` 在 `setState('ready')` 之后，只要还有 viewer 就 `await this.openStream()`——所有"起一个新浏览器"的路径（首次、重启按钮、死亡后下一次请求、改启动项）都经过这里，一处覆盖四条路径。回归测试三条：重启、崩溃后自动替换、改启动项（`test/session-browser.test.ts`）。
+
 ### 二、功能
 
 **4. 工具补齐到 6 个（已完成）。** 新增 `browser_snapshot`（ARIA 树 + ref）、`browser_click`（ref → `DOM.getContentQuads` → 真实鼠标事件）、`browser_type`（`DOM.focus` + `Input.insertText` + 可选按键）。ref 只在当前页有效，导航即失效，失效时报错并指向 `browser_snapshot`。

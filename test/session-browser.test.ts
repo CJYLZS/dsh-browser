@@ -184,6 +184,68 @@ test('a restart replaces the browser and keeps the session', async () => {
   assert.equal(browser.status().sessionId, 'session-a')
 })
 
+/**
+ * Wait until a condition holds, so an assertion does not race a `void`ed
+ * asynchronous path.
+ * @param condition - the predicate to wait on.
+ * @param what - description used in the failure message.
+ */
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (condition()) return
+    await new Promise(resolve => { setTimeout(resolve, 5) })
+  }
+  throw new Error(`timed out waiting for ${what}`)
+}
+
+/** One frame's worth of payload, as Chrome sends it. */
+const FRAME = { data: Buffer.from('jpeg').toString('base64'), sessionId: 1, metadata: { deviceWidth: 10, deviceHeight: 10 } }
+
+test('a viewer that stays subscribed gets frames again after a restart', async () => {
+  const { browser, launch } = await started()
+  const frames: unknown[] = []
+  browser.addViewer(frame => frames.push(frame))
+  const first = launch.browsers[0]?.pages[0]
+  await until(() => (first?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the first screen cast')
+  first?.cdp.emit('Page.screencastFrame', FRAME)
+  assert.equal(frames.length, 1)
+
+  await browser.restart()
+  const second = launch.browsers[1]?.pages[0]
+  // The screen cast belonged to the old CDP session, so it has to be attached
+  // to the new one even though the viewer count never changed.
+  await until(() => (second?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the screen cast on the new browser')
+  second?.cdp.emit('Page.screencastFrame', FRAME)
+  assert.equal(frames.length, 2)
+})
+
+test('a viewer that stays subscribed gets frames again after the browser dies', async () => {
+  const { browser, launch } = await started()
+  const frames: unknown[] = []
+  browser.addViewer(frame => frames.push(frame))
+  await until(() => (launch.browsers[0]?.pages[0]?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the first screen cast')
+
+  launch.browsers[0]?.die('the window was closed')
+  await browser.ensure()
+  const second = launch.browsers[1]?.pages[0]
+  await until(() => (second?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the screen cast on the replacement')
+  second?.cdp.emit('Page.screencastFrame', FRAME)
+  assert.equal(frames.length, 1)
+})
+
+test('a viewer keeps getting frames when a launch setting changes', async () => {
+  const { browser, launch } = await started({ debugPort: 9333 })
+  const frames: unknown[] = []
+  browser.addViewer(frame => frames.push(frame))
+  await until(() => (launch.browsers[0]?.pages[0]?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the first screen cast')
+
+  await browser.reconfigure(Config({ debugPort: 9400 }) as BrowserConfig)
+  const second = launch.browsers[1]?.pages[0]
+  await until(() => (second?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the screen cast after the restart')
+  second?.cdp.emit('Page.screencastFrame', FRAME)
+  assert.equal(frames.length, 1)
+})
+
 test('a headless user agent is rewritten when stealth is on', async () => {
   const { page } = await started({ headless: true, stealth: true })
   assert.deepEqual(page.cdp.method('Network.setUserAgentOverride')[0]?.params, { userAgent: HEADFUL_UA })

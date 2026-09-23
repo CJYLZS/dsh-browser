@@ -547,6 +547,12 @@ export class SessionBrowser {
       }
       this.reason = undefined
       this.setState('ready')
+      // A viewer that stayed subscribed while this browser was being replaced
+      // is still watching, and the screen cast died with the old browser: it
+      // belongs to the CDP session that just went away. Nothing else re-attaches
+      // it — a viewer only starts one when it arrives — so a pane that was open
+      // across a restart or a crash would sit on its last frame forever.
+      await this.openStream()
       this.logger.info(
         `dsh-browser: session ${this.sessionId} is on ${await page.title().catch(() => '') || page.url()}`
         + ` — CDP on 127.0.0.1:${String(this.port)} (${session.version})`,

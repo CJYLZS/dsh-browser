@@ -17,6 +17,7 @@
 - **侧栏标签是观察窗，浏览器标签才是资源。** 关掉侧栏标签不关闭浏览器，只是这个 viewer 退订（重新打开会发现浏览器还在，若已死则在重连时自动换一个）；关闭浏览器用面板上的「关闭浏览器」；最后一条浏览器标签不可关（Chrome 关掉最后一个 tab 会退出整个进程）。
 - **page 的稳定标识用 CDP `targetId`**，不用自己 mint 的 id：外部 DevTools / Playwright 附加时看到的是同一个 id。工具侧的 ref（`e1`）是**快照内的临时标签**，导航即失效，只在当前页有效。
 - **浏览器死亡不是异常，是常态。** `context.on('close')` 已接：用户关窗口、崩溃都会进 `closed` 并带原因，`ensure()` 会重新起一个。新增任何"持有浏览器句柄"的状态时，都要想它在 `forget()` 之后会怎样。
+- **screencast 属于一个 CDP 会话，不属于 viewer。** 换浏览器（重启按钮、崩溃恢复、改启动项）就换掉了 CDP 会话，**仍订阅的 viewer 不会自己恢复**——它只在"订阅数 0→1"时挂流。所以 `start()` 里在 `ready` 之后统一补挂（`await this.openStream()`），一处覆盖四条路径。踩过的坑：只在"面板被卸载重挂"的路径上验证，会看不到这个缺陷（切走再切回恰好触发了 0→1）。凡是动流生命周期的改动，回归测试要覆盖**不重挂面板**的情形。
 - **风控靠关掉自动化标记解决，不靠换引擎。** Playwright 启动的浏览器一律 `navigator.webdriver === true`（headful 也一样），headless 还多带一个 `HeadlessChrome` UA。交替 3 轮 A/B、同一网络同一时间窗下：带这两个标记 0/3 通过，关掉后 3/3 通过。配置项 `stealth`（默认开）负责加 `--disable-blink-features=AutomationControlled` 并用 CDP 把 UA 里的 `Headless` 去掉。真需要二进制级隐身时用 `executablePath` 指向用户自备的隐身 Chromium——不要把第三方二进制打包进来。
 - 完整实测证据与脚本见 `plan.txt` 的「实施记录」与 `.prove/`；多标签与页面生命周期的完整设计见 `plan.txt` 的「设计」一节。
 
