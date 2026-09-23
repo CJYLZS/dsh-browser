@@ -528,7 +528,13 @@ README 与许可文本有一处对不上（README 说最新构建免费可试，
 
 仍缺的：真实浏览器上的 `browser_type`（`insertText` 本身已在输入转发里用过，但没单独实测这个工具）、`maxInstances` 到顶时面板上的提示。
 
-9. 在 0.1.7 上跑一遍（`multiple` / `keepMounted` 都在那边），定下 peer 区间。
+**9. 0.1.7 适配（未做，卡在网络）。** 起了一个 pin 到 0.1.7 的临时副本想跑 `tsc` + `test`，但注册表下载在这个环境里持续失败（`UND_ERR_DESTROYED`，tarball 全部失败而 `npm view` 的元数据查询正常；关掉沙箱重试同样失败，所以是本机网络/代理的问题，不是沙箱）。副本已删除。
+
+顺带查清两件对适配有用的事实：
+
+- **各包版本不同步。** 截至今天（2026-09-23）：`dsh-tools` / `dsh-host-webserver` / `dsh-client-connection` / `dsh-session` / `dsh-settings` / `dsh-agent` / `dsh-client-store` 有 `0.1.7-rc.1`，但客户端包 `dsh-client-locale` / `dsh-client-ui-slots` / `dsh-client-ui-sidebar-right` / `dsh-client-ui-settings` **只到 `0.1.7-alpha.2`**（`dsh-client-store` 的 rc.1 存在，dockkit 的要看）。所以"升到 0.1.7"必须逐包选版本，不能一把替换。
+- **`^0.1.5-rc.2` 不覆盖 0.1.7 的预发布版。** semver 规则：范围里带预发布标签时，只有同一 `major.minor.patch` 的预发布版才可能满足它。要让 0.1.7 的 rc/alpha 满足 peer 区间，得显式写出来（例如 `^0.1.5-rc.2 || ^0.1.7-alpha.2`），否则 profile 里装 0.1.7 时会报 peer 不满足。
+- 另外 `next` 线上已经是 `0.1.5-rc.3`（比本 checkout 的 rc.2 新）。
 10. **跨平台未验证**：整个开发都在 Windows 上，macOS / Linux 一次没跑过（`channel: 'chrome'` 的查找、临时目录、进程回收）。
 
 ### 还需要你定的
