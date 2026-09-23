@@ -524,7 +524,7 @@ README 与许可文本有一处对不上（README 说最新构建免费可试，
 
 ### 三、发布工程
 
-**6. 独立仓库（已建）。** `lib/dsh-browser` 现在自己是一个 git 仓库（`git init` + 首个提交；`lib/` 入库，`.gitignore` 排除 `node_modules` / `.pnpm-store` / `.prove`，`.gitattributes` 固定 LF）。构建产物与源码一致已核对：重新 `pnpm run build` 之后 `git status` 干净，所以从 GitHub 装不需要构建步骤。**远程仓库还没建**——推送是外部动作，等你确认（`repository` 先按 `CJYLZS/dsh-browser` 填）。README 重写为英文主 + `README.zh.md`，安装说明改成 `dsh plugin add --profile web github:...`。
+**6. 独立仓库（已建并已推送）。** `lib/dsh-browser` 自己是一个 git 仓库（`lib/` 入库，`.gitignore` 排除 `node_modules` / `.pnpm-store` / `.prove`，`.gitattributes` 固定 LF），远程在 https://github.com/CJYLZS/dsh-browser（public，与 `dsh-remote-development` 一致；默认分支 `main`，本地原来的 `master` 在首次推送前改名对齐）。构建产物与源码一致已核对：重新 `pnpm run build` 之后 `git status` 干净，所以从 GitHub 装不需要构建步骤——`lib/index.js`、`lib/client.js` 与四张截图都在推送的树里。README 重写为英文主 + `README.zh.md`，安装说明改成 `dsh plugin add --profile web github:CJYLZS/dsh-browser`。
 
 **7. `private: true` 已去掉**，补齐 `license: MIT`、`keywords`、`repository`、LICENSE 文件；`peerDependencies` 列出 profile 必须提供的 8 个包（`^0.1.5-rc.2`）。
 
