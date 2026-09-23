@@ -518,11 +518,16 @@ README 与许可文本有一处对不上（README 说最新构建免费可试，
 
 **5. 截图仍是文件路径（已确认，无需改）。** `ImageBlock` 要的是 `ImageAttachmentRef`（"owned by the attachment service"），插件无法自行签发；而且 `packages/llm/llm/src/types.ts:71` 写明只有 user 消息可以带图，工具结果这条路径在当前适配器下用不了。留给 0.1.7 之后的 `browser-use` 图片结果能力。
 
-### 三、发布工程（未完成）
+### 三、发布工程
 
-6. **建独立仓库**——`lib/dsh-browser` 仍不在任何版本控制里（`git rev-parse --show-toplevel` 是 harness 根，而 harness 忽略 `lib/`）。按 `dsh-remote-development` 的形状：`lib/` 入库、`files`、`license: MIT`、`repository`、双语 README（英文主 + `README.zh.md`）、LICENSE 文件、`test` 脚本。安装说明也要重写。
-7. 去掉 `private: true`。
-8. 测试集：已完成（`node --test`，不用 tsx——Node 24 原生剥离类型即可跑 `.ts`），当前 78 个用例，覆盖输入映射、坐标换算、screencast 确认/终止顺序、配置校验、profile 段名转义、端口分配、池的隔离/上限/回收/重启、AX 树格式化、面板与工具的两个方向。仍缺：真实浏览器上的 `browser_type`、`maxInstances` 到顶时的面板提示。
+**6. 独立仓库（已建）。** `lib/dsh-browser` 现在自己是一个 git 仓库（`git init` + 首个提交；`lib/` 入库，`.gitignore` 排除 `node_modules` / `.pnpm-store` / `.prove`，`.gitattributes` 固定 LF）。构建产物与源码一致已核对：重新 `pnpm run build` 之后 `git status` 干净，所以从 GitHub 装不需要构建步骤。**远程仓库还没建**——推送是外部动作，等你确认（`repository` 先按 `CJYLZS/dsh-browser` 填）。README 重写为英文主 + `README.zh.md`，安装说明改成 `dsh plugin add --profile web github:...`。
+
+**7. `private: true` 已去掉**，补齐 `license: MIT`、`keywords`、`repository`、LICENSE 文件；`peerDependencies` 列出 profile 必须提供的 8 个包（`^0.1.5-rc.2`）。
+
+**8. 测试集（已完成）。** `pnpm test` = `node --test`，不用 tsx——Node 24 原生剥离类型，代价是插件代码不能出现 enum / 参数属性这类不可擦除语法。当前 78 个用例，覆盖输入映射、坐标换算、screencast 确认/终止顺序、配置校验、profile 段名转义、端口分配、池的隔离/上限/回收/重启、AX 树格式化，以及面板与工具两侧的会话解析。涉及浏览器的用例跑在 `test/support/browser.ts` 的记录型启动器上，不需要真 Chrome。
+
+仍缺的：真实浏览器上的 `browser_type`（`insertText` 本身已在输入转发里用过，但没单独实测这个工具）、`maxInstances` 到顶时面板上的提示。
+
 9. 在 0.1.7 上跑一遍（`multiple` / `keepMounted` 都在那边），定下 peer 区间。
 10. **跨平台未验证**：整个开发都在 Windows 上，macOS / Linux 一次没跑过（`channel: 'chrome'` 的查找、临时目录、进程回收）。
 

@@ -1,6 +1,8 @@
 # AGENTS.md — dsh-browser
 
-本目录是 harness 仓库之外的外部 dsh 插件（`lib/` 已被 gitignore，不入 harness 仓库）。本文件只约束在 `lib/dsh-browser/` 里的工作。
+本目录是 harness 仓库之外的外部 dsh 插件：harness 的 `.gitignore` 忽略 `lib/`，所以本目录**自己是一个 git 仓库**（`lib/` 构建产物随仓库提交，安装时无需构建）。本文件只约束在 `lib/dsh-browser/` 里的工作。
+
+改动之后跑的最小集合：`pnpm run typecheck && pnpm test && pnpm run build`——最后一步不能省，`lib/` 是提交进仓库的产物，不重新构建就会让仓库里的产物与源码不一致。
 
 ## 已定方向（2026-09-23 实测）
 
