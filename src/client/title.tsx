@@ -10,17 +10,8 @@
  */
 import type { ReactNode } from 'react'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { CHIP_GLYPH, CHIP_GLYPH_SIZE } from './chip.ts'
 import { BrowserGlyph } from './glyph.ts'
-/**
- * Placement for the glyph inside a chip.
- *
- * The chip lays its content out as text, so the icon is an inline box nudged
- * onto the text's optical centre — this bundle has no stylesheet of its own, so
- * it cannot be a class.
- */
-const GLYPH: Readonly<Record<string, string>> = {
-  display: 'inline-block', verticalAlign: '-3px', marginRight: '5px', flex: '0 0 auto',
-}
 
 /**
  * The title as the chip and a floating panel's header show it.
@@ -31,7 +22,7 @@ export function BrowserTitle({ useTabInfo }: PropsRuntime<'sidebar.right.pane.ta
   const { tab } = useTabInfo()
   return (
     <>
-      <span style={GLYPH}><BrowserGlyph size={14} /></span>
+      <span style={CHIP_GLYPH}><BrowserGlyph size={CHIP_GLYPH_SIZE} /></span>
       {tab.title}
     </>
   )
