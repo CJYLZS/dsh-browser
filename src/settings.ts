@@ -1,41 +1,43 @@
 /**
- * Make the plugin's configuration editable at runtime.
+ * Keep the plugin's configuration editable at runtime.
  *
- * The composition entry stays the base layer and the settings document holds
- * user overrides above it, so a deployment that configures the browser in
- * cordis.yml keeps working while the settings page changes the same fields.
- * Without a settings provider nothing is registered and the entry config is
- * the configuration, exactly as composed.
+ * The Host derives the settings namespace and its schema from this plugin's
+ * loader entry, so nothing is registered host-side for the values to be
+ * editable: the client half binds the same namespace and writes through it.
+ * What remains here are the two facts the Host cannot infer.
  *
- * Every field here changes how the browser is launched, so a change while one
- * is running closes it; viewers stay subscribed and the next frame request
- * starts a new browser from the new values.
+ * The page policy: the settings shell would otherwise expect a client that
+ * generates pages from the schema, and no shipped client does that yet.
+ *
+ * The follow-through: every field the page edits is volatile, so an edit
+ * rewrites this plugin's config object in place and announces it, and the
+ * browsers follow the new values. Every such field changes how a browser is
+ * launched, so a change while one is running restarts it; viewers stay
+ * subscribed and the next frame request starts a browser from the new values.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-settings'
-import { Config, type BrowserConfig } from './config.ts'
+import type { BrowserConfig } from './config.ts'
 import type { BrowserPool } from './browser/pool.ts'
 
-/** The settings namespace this plugin owns. */
+/** The settings namespace this plugin owns: its profile entry id. */
 export const SETTINGS_NAMESPACE = 'dsh-browser'
 
 /**
- * Register the settings namespace and follow it.
+ * Declare this plugin's page policy and follow its volatile configuration.
  * @param ctx - plugin context.
- * @param entry - the composition entry config, used as the base layer.
+ * @param resolve - reads the current values out of the configuration the loader holds.
  * @param pool - the browsers that are reconfigured on every change.
  */
-export function installSettings(ctx: Context, entry: BrowserConfig, pool: BrowserPool): void {
-  ctx.inject(['settings'], (scoped) => {
-    // The authoritative value is the resolved scope while a settings provider
-    // is attached, and the composition entry whenever it is not.
-    let current: () => BrowserConfig = () => entry
-    scoped.settings.installSection(scoped, SETTINGS_NAMESPACE, Config, entry, {
-      setSource: (source: () => BrowserConfig) => { current = source },
-      // Every session's browser follows one shared configuration: the page is
-      // the same page in every conversation, and a deployment's browser choice
-      // is the deployment's, not the conversation's.
-      onChange: () => { void pool.reconfigure(current()) },
-    })
+export function installSettings(ctx: Context, resolve: () => BrowserConfig, pool: BrowserPool): void {
+  ctx.inject(['settings'], (child) => {
+    child.effect(
+      () => child.settings.configure({ auto: false }, ctx.fiber),
+      'dsh-browser: settings page policy',
+    )
   })
+  // The loader has already written the new values into the configuration by the
+  // time this fires, so reading it here sees the edit.
+  ctx.on('loader/volatile-update', () => { void pool.reconfigure(resolve()) })
 }

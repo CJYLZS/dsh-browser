@@ -6,11 +6,11 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { Config, type BrowserConfig } from '../src/config.ts'
+import { plainConfig, Config, type BrowserConfig } from '../src/config.ts'
 
 /** Resolve a partial configuration the way the plugin does at load. */
 function resolve(input: Partial<BrowserConfig>): BrowserConfig {
-  return Config(input) as BrowserConfig
+  return plainConfig(Config(input))
 }
 
 test('an empty configuration resolves to the documented defaults', () => {

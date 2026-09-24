@@ -27,6 +27,7 @@ It is not an embedded web view. The page runs in an ordinary browser process, so
 
 - [Highlights](#highlights)
 - [Install](#install)
+- [Compatibility](#compatibility)
 - [Usage](#usage)
 - [Understand the design](#understand-the-design)
 - [Configuration](#configuration)
@@ -40,11 +41,20 @@ It is not an embedded web view. The page runs in an ordinary browser process, so
 <a id="install"></a>
 ## Install
 
-From GitHub (recommended) — the built `lib/` is committed, so it is one command with no build step:
+Check the host dsh version first:
 
 ```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser
+dsh -V
 ```
+
+Then install with the `#<tag>` ref that version pairs with — a build targets one dsh generation, and a `github:` install without a ref takes the default branch HEAD, which drifts:
+
+| Your dsh | Plugin version | Install command |
+| --- | --- | --- |
+| ≥ 0.1.7-rc.1 | v0.2.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0` |
+| 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
+
+The built `lib/` is committed with each tag, so a tag install needs no build step. The profile's `package.json` records the ref you chose; to change versions, re-add with the new ref, and to remove the plugin use `dsh plugin remove --profile web dsh-browser`.
 
 For development, link a local checkout instead:
 
@@ -56,6 +66,20 @@ dsh plugin add --profile web link:/absolute/path/to/dsh-browser
 ```
 
 A `link:` install points the profile at the checkout directory, so later `pnpm run build` runs apply on the next harness restart without re-adding. Either way, restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
+
+-----
+
+<a id="compatibility"></a>
+## Compatibility
+
+dsh changed its settings model in 0.1.7-rc.1 with no compatibility layer. A plugin page is now derived from the Config schema's `volatile` fields instead of being registered against a namespace scope: `SettingsScope` and `SettingsForms.installSection` are gone, the client service is `ctx.configForms`, and a volatile field arrives as a `Volatile<T>` that has to be read through rather than used directly.
+
+That fork is in the client half's imports, so one build cannot target both generations and the plugin pairs by generation:
+
+- **v0.2.x → dsh ≥ 0.1.7-rc.1**, declared as `peerDependencies: >=0.1.7-rc.1 <0.2.0`. The settings page's fields are marked volatile in the schema, and an edit reaches the running browsers through `loader/volatile-update`.
+- **v0.1.x → dsh 0.1.5-rc.2**, declared as `peerDependencies: ^0.1.5-rc.2`. The settings page registers a namespace scope and renders its own controls.
+
+A mismatched pair fails loudly: dsh refuses to activate a plugin whose dsh peers its version does not satisfy, naming the plugin and the unsatisfied ranges.
 
 <a id="usage"></a>
 ## Usage
@@ -135,8 +159,7 @@ Screenshots return a path rather than an inline image. An image content block ca
 ## Known Limitations and Deferred Work
 
 - **Verified on Windows only.** macOS and Linux have not been run once: the `channel` lookup, temporary directories, and process teardown are the parts most likely to differ.
-- **Not run against 0.1.7 yet.** Development targets 0.1.5-rc.2. The peer range names that version, and 0.1.7 prereleases are not covered by it — the packages do not version in lockstep either (the client packages stop at `0.1.7-alpha.2` while host packages have `0.1.7-rc.1`), so the adaptation must pin per package.
-- **No tab strip.** The pane shows one page: the active one. A link that opens a tab or `window.open` moves the mirror and the tools to the new page and the tool results carry a tab summary, but you cannot switch between pages by hand inside the pane. The sidebar's own multi-tab capability arrives with 0.1.7 (`multiple`/`keepMounted` in the slot contract).
+- **No tab strip.** The pane shows one page: the active one. A link that opens a tab or `window.open` moves the mirror and the tools to the new page and the tool results carry a tab summary, but you cannot switch between pages by hand inside the pane.
 - **Tabs opened by hand inside the browser window are not followed.** A headful browser switched by its own tab strip keeps the mirror where it was; only pages the plugin is told about (tool calls, `window.open` from the page) move it.
 - **IME composition does not work in the sidebar.** During composition `event.key` is `Process` rather than a character, and key forwarding handles single characters plus a few named keys (Enter, Tab, arrows). Pasting and plain ASCII typing are unaffected. The agent's `browser_type` is unaffected too: it inserts text rather than replaying keys.
 - **Frames only when the page repaints.** `Page.startScreencast` is repaint-driven, so a page that never changes produces almost no frames and the pane keeps the last one. This is not a hang.
@@ -154,7 +177,7 @@ Screenshots return a path rather than an inline image. An image content block ca
 <a id="dev-note"></a>
 ## Dev Note
 
-The plugin directory is a self-contained pnpm workspace (`packages: [- .]`, `storeDir: .pnpm-store`) so pnpm cannot reach the harness repository's workspace. dsh framework packages are `peerDependencies` (`^0.1.5-rc.2`, supplied by the host profile) and pinned exactly in `devDependencies` for local types and builds.
+The plugin directory is a self-contained pnpm workspace (`packages: [- .]`, `storeDir: .pnpm-store`) so pnpm cannot reach the harness repository's workspace. dsh framework packages are `peerDependencies` (`>=0.1.7-rc.1 <0.2.0`, supplied by the host profile) and pinned exactly in `devDependencies` for local types and builds.
 
 Commands: `pnpm run build` (tsdown, both halves), `pnpm run typecheck`, `pnpm test`, and the measurement rigs in `scripts/` (`prove.mjs` for the CDP port, screen cast, input dispatch, and screenshot; `modes.mjs` for headless/windowed/minimized; `cdp.mjs` to read or drive a running browser over its external port, with `--port=` to pick a session's).
 

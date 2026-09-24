@@ -21,10 +21,10 @@ import { registerStream } from './view/server.ts'
 import { registerStatus } from './view/status.ts'
 import { registerTools } from './tools/index.ts'
 import { installSettings } from './settings.ts'
-import { Config, type BrowserConfig } from './config.ts'
+import { Config, plainConfig, type BrowserConfig, type BrowserConfigInput } from './config.ts'
 
-export { Config }
-export type { BrowserConfig }
+export { Config, plainConfig }
+export type { BrowserConfig, BrowserConfigInput }
 
 /** Plugin identity in cordis diagnostics. */
 export const name = 'dsh-browser'
@@ -42,15 +42,19 @@ export const inject = ['tools', 'webServer', 'connection']
 /**
  * Host half: own the browsers, serve the mirror, and register the tools.
  * @param ctx - plugin context.
- * @param config - resolved plugin configuration.
+ * @param config - the configuration the loader holds, whose editable fields it
+ * rewrites in place.
  */
-export function apply(ctx: Context, config: BrowserConfig): void {
-  const pool = new BrowserPool(config, ctx.logger)
+export function apply(ctx: Context, config: BrowserConfigInput): void {
+  // Read through the wrappers on every use, so a settings edit is picked up
+  // without the plugin being remounted around it.
+  const resolve = (): BrowserConfig => plainConfig(config)
+  const pool = new BrowserPool(resolve(), ctx.logger)
   ctx.effect(() => () => { void pool.closeAll() }, 'dsh-browser: browser lifetime')
   // A disposed session cannot come back, so its browser is a process, a profile,
   // and a CDP port held for a conversation nobody can return to.
   ctx.on('session/disposed', (session) => { void pool.dispose(session.id) })
-  installSettings(ctx, config, pool)
+  installSettings(ctx, resolve, pool)
   registerStream(ctx, pool)
   registerStatus(ctx, pool)
   registerTools(ctx, pool)

@@ -27,6 +27,7 @@
 
 - [特点](#highlights)
 - [安装](#install)
+- [版本适配](#compatibility)
 - [使用](#usage)
 - [理解设计](#understand-the-design)
 - [配置](#configuration)
@@ -40,11 +41,20 @@
 <a id="install"></a>
 ## 安装
 
-从 GitHub 装（推荐）——构建产物 `lib/` 随仓库提交，所以一条命令即可，不需要构建：
+先确认宿主 dsh 版本：
 
 ```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser
+dsh -V
 ```
+
+再按该版本对应的 `#<tag>` 引用安装——一份构建只针对一个 dsh 世代，而不带 ref 的 `github:` 安装会取默认分支的 HEAD，那个位置会漂：
+
+| 你的 dsh | 插件版本 | 安装命令 |
+| --- | --- | --- |
+| ≥ 0.1.7-rc.1 | v0.2.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0` |
+| 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
+
+构建产物 `lib/` 随每个 tag 提交，所以按 tag 安装不需要构建。profile 的 `package.json` 会记下你选的 ref；换版本就用新 ref 重新 add，移除插件用 `dsh plugin remove --profile web dsh-browser`。
 
 开发时改为链接本地检出：
 
@@ -56,6 +66,20 @@ dsh plugin add --profile web link:/absolute/path/to/dsh-browser
 ```
 
 `link:` 安装把 profile 指向检出目录，之后 `pnpm run build` 的产物在下次重启 harness 时生效，不必重新 add。两种方式装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
+
+-----
+
+<a id="compatibility"></a>
+## 版本适配
+
+dsh 在 0.1.7-rc.1 改掉了设置模型，且没有兼容层。插件页面现在由 Config schema 的 `volatile` 字段派生，而不再是针对某个 namespace scope 注册：`SettingsScope` 与 `SettingsForms.installSection` 都已移除，客户端服务改为 `ctx.configForms`，volatile 字段以 `Volatile<T>` 形式到达，必须经由它读取而不能直接使用。
+
+这个分叉落在客户端半边的 import 上，因此一份构建无法同时针对两个世代，插件按世代配对：
+
+- **v0.2.x → dsh ≥ 0.1.7-rc.1**，声明为 `peerDependencies: >=0.1.7-rc.1 <0.2.0`。设置页的字段在 schema 上标为 volatile，编辑经 `loader/volatile-update` 抵达正在运行的浏览器。
+- **v0.1.x → dsh 0.1.5-rc.2**，声明为 `peerDependencies: ^0.1.5-rc.2`。设置页注册 namespace scope 并自行渲染控件。
+
+版本配错会明确失败：dsh 拒绝激活 dsh peer 版本不满足的插件，并报出插件名与未满足的区间。
 
 <a id="usage"></a>
 ## 使用
@@ -135,8 +159,7 @@ dsh plugin add --profile web link:/absolute/path/to/dsh-browser
 ## 已知限制与待办
 
 - **只在 Windows 上验证过。** macOS 与 Linux 一次没跑过：`channel` 的查找、临时目录、进程回收是最可能出差异的部分。
-- **还没在 0.1.7 上跑过。** 开发目标是 0.1.5-rc.2，peer 区间写的也是它，而 0.1.7 的预发布版不在这个区间内；各包版本也不齐（客户端包只到 `0.1.7-alpha.2`，host 包已有 `0.1.7-rc.1`），所以适配必须逐包钉版本。
-- **没有标签条。** 面板只显示一个页面：当前活动页。打开新标签的链接或 `window.open` 会把镜像与工具一起带到新页面，工具结果里也带标签摘要，但你无法在面板里手工切换页面。侧栏自己的多标签能力要等 0.1.7（槽位契约里的 `multiple`/`keepMounted`）。
+- **没有标签条。** 面板只显示一个页面：当前活动页。打开新标签的链接或 `window.open` 会把镜像与工具一起带到新页面，工具结果里也带标签摘要，但你无法在面板里手工切换页面。
 - **在浏览器窗口里手工开的标签不会被跟随。** 带窗口的浏览器里用它的标签条切页，镜像不会跟着走；只有插件被告知的页面（工具调用、页面自己发起的 `window.open`）才会移动它。
 - **侧栏里走 IME 的中文输入不工作。** 组合输入期间 `event.key` 是 `Process` 而不是单字符，键盘转发只处理单字符与少量命名键（Enter / Tab / 方向键等）。粘贴与直接键入 ASCII 不受影响；agent 的 `browser_type` 也不受影响，它插入文本而不是重放按键。
 - **只在页面重绘时出帧。** `Page.startScreencast` 是重绘驱动的，完全静止的页面几乎不出帧，面板保留最后一帧。这不是卡住。
@@ -154,7 +177,7 @@ dsh plugin add --profile web link:/absolute/path/to/dsh-browser
 <a id="dev-note"></a>
 ## 开发
 
-插件目录是自包含的 pnpm workspace（`packages: [- .]`、`storeDir: .pnpm-store`），因此 pnpm 够不到 harness 仓库的 workspace。dsh 框架包声明为 `peerDependencies`（`^0.1.5-rc.2`，由 host profile 提供），并在 `devDependencies` 里精确钉住，供本地类型与构建使用。
+插件目录是自包含的 pnpm workspace（`packages: [- .]`、`storeDir: .pnpm-store`），因此 pnpm 够不到 harness 仓库的 workspace。dsh 框架包声明为 `peerDependencies`（`>=0.1.7-rc.1 <0.2.0`，由 host profile 提供），并在 `devDependencies` 里精确钉住，供本地类型与构建使用。
 
 命令：`pnpm run build`（tsdown，两半都产出）、`pnpm run typecheck`、`pnpm test`，以及 `scripts/` 下的实测脚本（`prove.mjs` 验证 CDP 端口、screencast、输入派发与截图；`modes.mjs` 对照无头/带窗口/最小化；`cdp.mjs` 通过对外端口读写一台运行中的浏览器，用 `--port=` 指定某个会话的）。
 

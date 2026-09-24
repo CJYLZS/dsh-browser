@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
-import { Config, type BrowserConfig } from '../src/config.ts'
+import { plainConfig, Config, type BrowserConfig } from '../src/config.ts'
 import { PortAllocator } from '../src/browser/ports.ts'
 import { SessionBrowser } from '../src/browser/session-browser.ts'
 import { fakeLauncher, HEADFUL_UA, type FakeLaunch, type FakePage } from './support/browser.ts'
@@ -51,7 +51,7 @@ function harness(config: Partial<BrowserConfig> = {}): Harness {
   const launch = fakeLauncher()
   const logger = { info: () => {}, warn: () => {} } as unknown as Context['logger']
   const browser = new SessionBrowser('session-a', {
-    config: Config(config) as BrowserConfig,
+    config: plainConfig(Config(config)),
     ports: new PortAllocator(9333, [], async () => true),
     launch: launch.launch,
     logger,
@@ -239,7 +239,7 @@ test('a viewer keeps getting frames when a launch setting changes', async () => 
   browser.addViewer(frame => frames.push(frame))
   await until(() => (launch.browsers[0]?.pages[0]?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the first screen cast')
 
-  await browser.reconfigure(Config({ debugPort: 9400 }) as BrowserConfig)
+  await browser.reconfigure(plainConfig(Config({ debugPort: 9400 })))
   const second = launch.browsers[1]?.pages[0]
   await until(() => (second?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the screen cast after the restart')
   second?.cdp.emit('Page.screencastFrame', FRAME)

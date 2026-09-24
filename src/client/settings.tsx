@@ -16,7 +16,7 @@
  * repository's stylesheet pipeline, so a CSS import would have no owner.
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactElement, type ReactNode } from 'react'
-import type { SettingsScope, SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm, SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { DshBrowserKey } from './locales.ts'
 import { browserStatus, type ClientBrowserReport, type ClientBrowserStatus } from './api.ts'
 
@@ -35,8 +35,8 @@ export interface BrowserSettingsView {
 
 /** Injected face bound in the plugin's apply closure. */
 export interface BrowserSettingsInjected {
-  /** The namespace scope this page reads and writes. */
-  readonly scope: SettingsScope<BrowserSettingsView>
+  /** The namespace form this page reads and writes. */
+  readonly form: ConfigForm<BrowserSettingsView>
   /** Copy for this namespace. */
   readonly t: (key: DshBrowserKey) => string
 }
@@ -156,9 +156,9 @@ function instanceLine(instance: ClientBrowserStatus, t: (key: DshBrowserKey) => 
 export function BrowserSettingsSection(
   props: SettingsSectionOwnerProps & BrowserSettingsInjected,
 ): ReactElement {
-  const { scope, t } = props
-  const subscribe = useCallback((listener: () => void) => scope.subscribe(listener), [scope])
-  const snapshot = useSyncExternalStore(subscribe, () => scope.getSnapshot())
+  const { form, t } = props
+  const subscribe = useCallback((listener: () => void) => form.subscribe(listener), [form])
+  const snapshot = useSyncExternalStore(subscribe, () => form.getSnapshot())
   // Held above the early returns so the hook order never changes between the
   // loading, unavailable, and ready renders.
   const [persistentChoice, setPersistentChoice] = useState<boolean | undefined>(undefined)
@@ -194,9 +194,9 @@ export function BrowserSettingsSection(
    * than the one that is on its way out. Resetting a field is a write like any
    * other and goes through here too — otherwise the banner keeps reporting the
    * browser the user just replaced.
-   * @param operation - the scope write to track.
+   * @param operation - the form write to track.
    */
-  const commit = (operation: Promise<void>): void => {
+  const commit = (operation: Promise<unknown>): void => {
     setSaved(false)
     setSaveError(undefined)
     void operation.then(() => {
@@ -215,7 +215,7 @@ export function BrowserSettingsSection(
    * @param next - its new value.
    */
   const write = (field: keyof BrowserSettingsView, next: unknown): void => {
-    commit(scope.set(field, next))
+    commit(form.set(field, next))
   }
 
   if (snapshot.status === 'loading') return <p style={styles.intro}>{t('settingsLoading')}</p>
@@ -240,7 +240,7 @@ export function BrowserSettingsSection(
       resetLabel={t('settingsReset')}
       onReset={() => {
         if (field === 'userDataDir') setPersistentChoice(undefined)
-        commit(scope.unset(field))
+        commit(form.unset(field))
       }}
     >
       {control}

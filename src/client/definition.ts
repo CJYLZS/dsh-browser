@@ -32,6 +32,6 @@ export function browserDefinition(
     kind: BROWSER_KIND,
     priority: 'extension',
     title,
-    guide: [{ order: 40, title: guideTitle, description: guideDescription }],
+    guide: [{ id: BROWSER_ID, order: 40, title: guideTitle, description: guideDescription }],
   }
 }

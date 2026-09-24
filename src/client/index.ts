@@ -55,17 +55,21 @@ export function apply(ctx: ClientContext): void {
     },
     BrowserBody,
   )), 'dsh-browser: viewer body')
-  // The settings page needs the settings domain's own client service, which a
-  // deployment without the settings surface does not provide; without it the
-  // page simply never registers and the composed configuration stays in force.
-  ctx.inject(['settingsScope'], (settingsCtx) => {
-    const scope = settingsCtx.settingsScope.bind<BrowserSettingsView>({ namespace: SETTINGS_NAMESPACE })
-    settingsCtx.slots.inject('settings.section', () => settingsCtx.slots.register({
-      name: 'settings.section',
-      id: BROWSER_ID,
-      order: 46,
-      label: () => t('settingsTitle'),
-      inject: () => ({ scope, t }),
-    }, BrowserSettingsSection))
+  // The page appears only while the Host serves this namespace: a deployment
+  // that never loaded the plugin's host half has no configuration to edit, so
+  // the page registers nothing and the tab shows no trace of it.
+  ctx.inject(['configForms'], (settingsCtx) => {
+    const form = settingsCtx.configForms.get<BrowserSettingsView>(SETTINGS_NAMESPACE)
+    settingsCtx.effect(
+      () => settingsCtx.configForms.whileServed([SETTINGS_NAMESPACE], () =>
+        settingsCtx.slots.inject('settings.section', () => settingsCtx.slots.register({
+          name: 'settings.section',
+          id: BROWSER_ID,
+          order: 46,
+          label: () => t('settingsTitle'),
+          inject: () => ({ form, t }),
+        }, BrowserSettingsSection))),
+      'dsh-browser: settings section',
+    )
   })
 }

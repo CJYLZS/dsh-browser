@@ -6,6 +6,7 @@
  * lives, and how much bandwidth the mirror spends. Empty strings mean "not
  * set" so the schema stays free of optionality.
  */
+import type { Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 
 /** Which installed Chromium-family browser Playwright should start. */
@@ -90,18 +91,72 @@ export interface BrowserConfig {
   extraArgs: string[]
 }
 
-/** Schema for {@link BrowserConfig}. */
-export const Config: z<BrowserConfig> = z.object({
-  channel: z.union([z.const('chrome'), z.const('msedge')]).default('chrome'),
-  executablePath: z.string().default(''),
-  headless: z.boolean().default(true),
-  userDataDir: z.string().default(''),
-  debugPort: z.natural().max(65535).default(9333),
-  viewportWidth: z.natural().default(1440),
-  viewportHeight: z.natural().default(900),
-  stealth: z.boolean().default(true),
+/**
+ * The fields the settings page edits, as the loader holds them.
+ *
+ * A volatile field is a reference the loader rewrites in place, which is how an
+ * edit reaches a running plugin without remounting it; everything else in
+ * {@link BrowserConfig} arrives as a plain value.
+ */
+export interface BrowserConfigVolatile {
+  channel: Volatile<BrowserChannel>
+  executablePath: Volatile<string>
+  headless: Volatile<boolean>
+  userDataDir: Volatile<string>
+  debugPort: Volatile<number>
+  viewportWidth: Volatile<number>
+  viewportHeight: Volatile<number>
+  stealth: Volatile<boolean>
+  quality: Volatile<number>
+}
+
+/** What the loader hands `apply`: {@link BrowserConfig} with its editable fields wrapped. */
+export type BrowserConfigInput = Omit<BrowserConfig, keyof BrowserConfigVolatile> & BrowserConfigVolatile
+
+/**
+ * Read the current values out of a resolved configuration.
+ *
+ * Called per use rather than once, because a volatile field's contents change
+ * when the settings page writes one; the wrapper is what stays the same.
+ * @param config - the configuration the loader holds.
+ * @returns the plain configuration the rest of the plugin works with.
+ */
+export function plainConfig(config: BrowserConfigInput): BrowserConfig {
+  return {
+    ...config,
+    channel: config.channel.get(),
+    executablePath: config.executablePath.get(),
+    headless: config.headless.get(),
+    userDataDir: config.userDataDir.get(),
+    debugPort: config.debugPort.get(),
+    viewportWidth: config.viewportWidth.get(),
+    viewportHeight: config.viewportHeight.get(),
+    stealth: config.stealth.get(),
+    quality: config.quality.get(),
+  }
+}
+
+/**
+ * Schema for {@link BrowserConfigInput}.
+ *
+ * Marking a field volatile is what puts it on the settings page: the shell
+ * exposes exactly the fields a volatile ancestor makes editable, and rewrites
+ * them in place instead of remounting the plugin, so a running browser is
+ * restarted onto the new values rather than losing the pane watching it.
+ * Launch and encoding fields are volatile for that reason; the rest are
+ * ordinary configuration, changeable from cordis.yml.
+ */
+export const Config = z.object({
+  channel: z.union([z.const('chrome'), z.const('msedge')]).default('chrome').volatile(),
+  executablePath: z.string().default('').volatile(),
+  headless: z.boolean().default(true).volatile(),
+  userDataDir: z.string().default('').volatile(),
+  debugPort: z.natural().max(65535).default(9333).volatile(),
+  viewportWidth: z.natural().default(1440).volatile(),
+  viewportHeight: z.natural().default(900).volatile(),
+  stealth: z.boolean().default(true).volatile(),
   startupUrl: z.string().default('about:blank'),
-  quality: z.natural().min(1).max(100).default(70),
+  quality: z.natural().min(1).max(100).default(70).volatile(),
   maxWidth: z.natural().default(1600),
   maxHeight: z.natural().default(1200),
   everyNthFrame: z.natural().default(1),

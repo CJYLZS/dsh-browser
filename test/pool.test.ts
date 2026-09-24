@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { BrowserPool } from '../src/browser/pool.ts'
-import { Config, type BrowserConfig } from '../src/config.ts'
+import { plainConfig, Config, type BrowserConfig } from '../src/config.ts'
 import { fakeLauncher, type FakeLaunch } from './support/browser.ts'
 
 /** A logger that keeps what it was told, so failures can be asserted. */
@@ -44,7 +44,7 @@ function recordingLog(): RecordingLog {
 function poolWith(config: Partial<BrowserConfig> = {}, launched?: FakeLaunch): { pool: BrowserPool; launch: FakeLaunch; log: RecordingLog } {
   const launch = launched ?? fakeLauncher()
   const log = recordingLog()
-  const resolved = Config(config) as BrowserConfig
+  const resolved = plainConfig(Config(config))
   const pool = new BrowserPool(resolved, log.logger, launch.launch, async () => true)
   return { pool, launch, log }
 }
@@ -149,7 +149,7 @@ test('a browser that dies on its own is reported and replaced on the next reques
 test('a launch field change restarts the browser it applies to', async () => {
   const { pool, launch } = poolWith({ debugPort: 9400 })
   await pool.get('session-a').ensure()
-  await pool.reconfigure(Config({ debugPort: 9500 }) as BrowserConfig)
+  await pool.reconfigure(plainConfig(Config({ debugPort: 9500 })))
   assert.equal(launch.browsers[0]?.closed, true)
   await pool.get('session-a').ensure()
   assert.equal(launch.browsers.length, 2)
@@ -159,7 +159,7 @@ test('a launch field change restarts the browser it applies to', async () => {
 test('an encoding change leaves the running browser alone', async () => {
   const { pool, launch } = poolWith()
   await pool.get('session-a').ensure()
-  await pool.reconfigure(Config({ quality: 40 }) as BrowserConfig)
+  await pool.reconfigure(plainConfig(Config({ quality: 40 })))
   assert.equal(launch.browsers[0]?.closed, false)
   assert.equal(pool.get('session-a').status().state, 'ready')
 })
