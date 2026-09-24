@@ -139,12 +139,13 @@ async function handleMessage(raw: string, browser: SessionBrowser): Promise<void
       await browser.reload()
       return
     // The pane's own two controls for a browser it cannot use: one throws away
-    // a browser that is gone or broken, the other stops one that is fine.
+    // a browser that is gone or broken, the other stops one that is fine — and
+    // asking for it to stop is what keeps it stopped.
     case 'restart':
       await browser.restart()
       return
     case 'close':
-      await browser.close()
+      await browser.stop()
       return
     default:
       throw new Error(`dsh-browser: unknown viewer message ${JSON.stringify(parsed.type)}`)

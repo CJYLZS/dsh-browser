@@ -82,11 +82,11 @@ A mismatched pair fails loudly: dsh refuses to activate a plugin whose dsh peers
 
 Three steps, and the agent needs no instruction beyond what it is asked to do:
 
-1. **Open the Browser tab.** In a conversation's right sidebar, pick **New tab → Browser**. That session's browser starts and its picture appears; the address bar navigates on Enter, and clicking, scrolling, and typing over the picture go to the real page.
+1. **Nothing, usually.** The first tool call that needs a browser starts one, and the right sidebar opens itself on that session's Browser tab — you watch the page from its first frame. You can also open it by hand: **New tab → Browser**.
 2. **Ask for something.** "Open the docs and tell me what the install section says" is enough: the tools act on the same browser the pane shows, so you watch the work happen.
 3. **Attach your own tools when you want them.** `curl http://127.0.0.1:9333/json/version` answers while the browser runs; `chrome://inspect`, another Playwright over `chromium.connectOverCDP`, and `scripts/cdp.mjs` all attach to it.
 
-Under the hood, the pane is a viewer of a browser that outlives it. Closing the tab does not stop the browser — reopen it and the same pages are there; stopping one is an explicit action in the pane's status row. A browser is not a per-request resource either: it stays alive between tool calls, which is what makes a conversation feel like it has a browser rather than a sequence of page loads.
+Under the hood, the pane is a viewer of a browser that outlives it. Closing the tab does not stop the browser — reopen it and the same pages are there. The pane's own **Close browser** does both: the browser stops and the tab goes with it, because a viewer left behind is one more thing that could start a browser you asked to stop. Either way the next tool call that needs a browser starts a fresh one and the sidebar comes back for it. A browser is not a per-request resource: it stays alive between tool calls, which is what makes a conversation feel like it has a browser rather than a sequence of page loads.
 
 -----
 

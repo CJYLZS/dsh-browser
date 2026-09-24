@@ -692,6 +692,18 @@ export class SessionBrowser {
   private labels = new RefLabels()
   /** Set while this class itself is closing the browser, so it is not a death. */
   private closing = false
+  /**
+   * Set while the user has stopped this browser and nothing has asked for one
+   * since.
+   *
+   * A browser that died is one the next request should bring back; a browser the
+   * user closed is not. A viewer is not a request: re-subscribing to the pane —
+   * a Sidebar tab switched away and back, the column hidden and shown, a reloaded
+   * client — used to start a fresh `about:blank` over the close the user had just
+   * asked for. Everything else that reaches {@link ensure} is asking for a
+   * browser and clears this.
+   */
+  private userClosed = false
   /** How many settle probes this browser has armed, for a slot no two share. */
   private settleSeq = 0
   /**
@@ -796,6 +808,10 @@ export class SessionBrowser {
    * @throws {Error} when the browser cannot start.
    */
   async ensure(): Promise<void> {
+    // Everything that gets here — a tool, a restart, a configuration change —
+    // is asking for a browser, so a close the user made earlier no longer
+    // stands. The one path that is not a request checks the flag itself.
+    this.userClosed = false
     if (this.state === 'ready') return
     if (this.starting !== undefined) {
       await this.starting
@@ -1691,6 +1707,20 @@ export class SessionBrowser {
     await this.removeTemporaryProfile()
   }
 
+  /**
+   * Stop the browser because the user asked, and keep it stopped.
+   *
+   * The pane's own close control lands here rather than on {@link close},
+   * because the two differ in what happens next: this one makes the close stand
+   * until something genuinely needs a browser, so a viewer that comes back finds
+   * a stopped browser instead of a fresh blank page.
+   * @returns after the browser has stopped.
+   */
+  async stop(): Promise<void> {
+    this.userClosed = true
+    await this.close()
+  }
+
   /** Start the browser, attach to its first page, and open the startup address. */
   private async start(): Promise<void> {
     this.setState('starting')
@@ -1822,6 +1852,11 @@ export class SessionBrowser {
 
   /** Attach the screencast for the current viewers, starting the browser if needed. */
   private async openStreamForViewers(): Promise<void> {
+    // A viewer arriving is not a request for a browser: the pane that
+    // re-subscribes here shows the closed state, with the restart control it
+    // already draws for one. Measured on 2026-09-24: a viewer that re-subscribed
+    // after the pane's own close button started a browser nobody asked for.
+    if (this.userClosed) return
     try {
       await this.ensure()
     } catch (error) {

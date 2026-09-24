@@ -12,6 +12,8 @@
  * repository's stylesheet pipeline, so a CSS import would have no owner.
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
+import type { SidebarRightTabInfo, UseSidebarRightTabInfo } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import { AddressGlobe } from './glyph.ts'
 import { en, type DshBrowserKey } from './locales.ts'
 
 /** Absolute path the host serves the mirror on. */
@@ -47,6 +49,14 @@ export interface BrowserBodyProps {
   readonly sessionId: string
   /** Copy for this namespace; without it the built-in English dictionary is used. */
   readonly t?: (key: DshBrowserKey) => string
+  /**
+   * The tab this body is mounted in.
+   *
+   * Supplied by the Sidebar's own seat alongside whatever `inject` names, so the
+   * pane can close itself: the browser is the only reason it exists, and a pane
+   * left behind is a viewer the host has to keep from starting one again.
+   */
+  readonly useTabInfo?: UseSidebarRightTabInfo | undefined
 }
 
 /** Translate one key, falling back to the bundled dictionary at this dynamic boundary. */
@@ -191,14 +201,6 @@ const LOCK_ICON = (
   </>
 )
 
-/** The globe an insecure or empty address shows. */
-const GLOBE_ICON = (
-  <>
-    <circle cx="8" cy="8" r="5.25" />
-    <path d="M2.75 8h10.5M8 2.75c1.5 1.5 2.25 3.25 2.25 5.25S9.5 14.5 8 13.25C6.5 11.75 5.75 10 5.75 8S6.5 4.25 8 2.75Z" />
-  </>
-)
-
 /** The circular arrow a page that needs no navigation shows. */
 const RELOAD_ICON = (
   <>
@@ -263,8 +265,11 @@ function IconButton(props: {
  * @param props - composed slot props.
  * @returns the viewer.
  */
-export function BrowserBody({ sessionId, t }: BrowserBodyProps): ReactNode {
+export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): ReactNode {
   const copy = copyOf(t)
+  // Read once per render, the way a hook is read: it is what closes this pane
+  // when the browser it mirrors is the thing going away.
+  const tab: SidebarRightTabInfo | undefined = useTabInfo?.()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | undefined>(undefined)
   const lastMoveRef = useRef(0)
@@ -394,19 +399,23 @@ export function BrowserBody({ sessionId, t }: BrowserBodyProps): ReactNode {
           style={{ ...style.scheme, ...secure ? {} : style.schemeInsecure }}
           title={secure ? copy('secure') : copy('insecure')}
         >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.3"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            {secure ? LOCK_ICON : GLOBE_ICON}
-          </svg>
+          {secure
+            ? (
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                {LOCK_ICON}
+              </svg>
+            )
+            : <AddressGlobe size={14} />}
         </span>
         <input
           style={style.address}
@@ -502,7 +511,17 @@ export function BrowserBody({ sessionId, t }: BrowserBodyProps): ReactNode {
         </span>
         {live
           ? (
-            <button type="button" style={style.statusButton} onClick={() => { send({ type: 'close' }) }}>
+            <button
+              type="button"
+              style={style.statusButton}
+              onClick={() => {
+                // The browser goes, and the pane goes with it: a viewer left
+                // subscribed to a browser the user has stopped is one more thing
+                // that could bring it back, and nothing to watch either way.
+                send({ type: 'close' })
+                tab?.tab.actions.close()
+              }}
+            >
               {copy('closeBrowser')}
             </button>
           )

@@ -13,9 +13,12 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { SessionIdOf } from '@deepseek-ai/dsh-client-ui-slots'
 import { BrowserBody } from './view.tsx'
+import { BrowserTitle } from './title.tsx'
+import { revealOnBrowserStart } from './reveal.ts'
 import { BrowserSettingsSection } from './settings.tsx'
 import type { BrowserSettingsView } from './settings-layout.ts'
 import { BROWSER_ID, browserDefinition } from './definition.ts'
+import { BrowserGlyph } from './glyph.ts'
 import { NS, en, zh, type DshBrowserKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -25,8 +28,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Required browser services: the tab registry, the slot registry, and copy. */
-export const inject = ['slots', 'locale', 'sidebarRightTabs']
+/** Required browser services: the tab registry, its navigation face, the slot registry, and copy. */
+export const inject = ['slots', 'locale', 'sidebarRightTabs', 'sidebarRight']
 
 /** The settings namespace the host half registers, and this page edits. */
 const SETTINGS_NAMESPACE = 'dsh-browser'
@@ -43,6 +46,7 @@ export function apply(ctx: ClientContext): void {
     () => t('title'),
     () => t('guideTitle'),
     () => t('guideDescription'),
+    BrowserGlyph,
   )), 'dsh-browser: cdpBrowser type')
   // The pane is a session-scoped slot, so its registration factory is handed
   // the session it is rendering for — which is exactly what the viewer has to
@@ -56,6 +60,16 @@ export function apply(ctx: ClientContext): void {
     },
     BrowserBody,
   )), 'dsh-browser: viewer body')
+  // The chip's glyph, registered the same keyed way the shipped guide type does
+  // it: without a registrant the strip shows the tab's captured title text alone,
+  // which is how the browser got a chip with no icon.
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register(
+    { name: 'sidebar.right.pane.tab.title', key: BROWSER_ID },
+    BrowserTitle,
+  )), 'dsh-browser: viewer title')
+  // The browser is the Session's, the pane is the user's: this is what puts one
+  // in front of the other when a tool starts a browser nobody is watching.
+  revealOnBrowserStart(ctx)
   // The page appears only while the Host serves this namespace: a deployment
   // that never loaded the plugin's host half has no configuration to edit, so
   // the page registers nothing and the tab shows no trace of it.

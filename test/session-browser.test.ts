@@ -313,6 +313,17 @@ async function until(condition: () => boolean, what: string): Promise<void> {
   throw new Error(`timed out waiting for ${what}`)
 }
 
+/**
+ * Give a `void`ed asynchronous path time to do something it must not.
+ *
+ * The mirror's subscription path starts a browser behind `void`, so a
+ * must-not-happen assertion has to wait a window rather than fail on the next
+ * line, where the wrong behaviour has not run yet either way.
+ */
+async function quiet(): Promise<void> {
+  await new Promise(resolve => { setTimeout(resolve, 50) })
+}
+
 /** One frame's worth of payload, as Chrome sends it. */
 const FRAME = { data: Buffer.from('jpeg').toString('base64'), sessionId: 1, metadata: { deviceWidth: 10, deviceHeight: 10 } }
 
@@ -359,6 +370,35 @@ test('a viewer keeps getting frames when a launch setting changes', async () => 
   await until(() => (second?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the screen cast after the restart')
   second?.cdp.emit('Page.screencastFrame', FRAME)
   assert.equal(frames.length, 1)
+})
+
+test('a viewer reconnecting does not start a browser the user stopped', async () => {
+  const { browser, launch } = await started()
+  const stopWatching = browser.addViewer(() => {})
+  await until(() => (launch.browsers[0]?.pages[0]?.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the screen cast')
+
+  await browser.stop()
+  assert.equal(browser.status().state, 'closed')
+  assert.equal(launch.browsers[0]?.closed, true)
+
+  // Switching Sidebar tabs and back, hiding the column and showing it again, or
+  // a client reload all arrive as the same thing here: this viewer goes away
+  // and a fresh one subscribes. None of them is a request for a browser.
+  stopWatching()
+  browser.addViewer(() => {})
+  await quiet()
+  assert.equal(launch.browsers.length, 1, 'a viewer restarted a browser the user had stopped')
+  assert.equal(browser.status().state, 'closed')
+})
+
+test('a tool call starts a new browser after the user stopped one', async () => {
+  const { browser, launch } = await started()
+  await browser.stop()
+
+  await browser.navigate('https://example.com')
+  assert.equal(launch.browsers.length, 2, 'the tool call did not ask for a browser')
+  assert.equal(browser.status().state, 'ready')
+  assert.equal(launch.browsers[1]?.pages[0]?.url, 'https://example.com')
 })
 
 test('a headless user agent is rewritten when stealth is on', async () => {

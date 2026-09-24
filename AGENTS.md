@@ -22,7 +22,8 @@
 - **按 session 隔离浏览器，单位是 session 不是工作目录。** 每个 session 一个浏览器实例（自己的进程、profile、cookie、CDP 端口、页集合），懒启动，`session/disposed` 回收。这与 ZCode 的行为一致。结构是 `BrowserPool`（按 session 持有）+ `SessionBrowser`（只服务一个会话）；工具用 `exec.agent?.id` 定位实例，面板用会话作用域槽位拿到的 `sessionId` 指名端口，两者必须是同一个 id（`Agent.id: SessionId`，已核对 `ApiSessionController` 的 `resumeSessionId` 路径）。**改动这一层时要同时想到三个消费方：面板（WS 查询参数）、工具（agent id）、设置页（root 作用域，看不到当前会话，只能看实例列表）。**
 - **CDP 端口是一段范围，不是地址。** `debugPortMin`/`debugPortMax` 是分配窗口，每实例一个端口，`PortAllocator` 取窗口内最小的可绑定端口并持有到浏览器关闭；窗口里没有空端口就报错并写出范围，绝不越界。`--remote-debugging-port=0` 不可用（实测见 [端口窗口那一篇](.agents/notes/implemented/feature/2026-09-24-debug-port-window.md)）。想知道某个会话在哪个端口，读 `/dsh-browser/status`，不要假设是配置里的值。**端口窗口不是 launch field**：浏览器监听的是分配到的那个端口，改窗口只影响之后启动的浏览器，不该把用户正在看的浏览器关掉（`LAUNCH_FIELDS` 里故意没有它）。
 - **`userDataDir` 是父目录。** 每会话一个子目录，段名用 harness 的 `encodeSegment` 规则转义（不自己发明）。推论：登录态不跨会话共享——这是"真实隔离"的代价，改回去就等于放弃隔离。headful 下每个用过的 session 各有一个窗口。
-- **侧栏标签是观察窗，浏览器标签才是资源。** 关掉侧栏标签不关闭浏览器，只是这个 viewer 退订（重新打开会发现浏览器还在，若已死则在重连时自动换一个）；关闭浏览器用面板上的「关闭浏览器」；最后一条浏览器标签不可关（Chrome 关掉最后一个 tab 会退出整个进程）。
+- **侧栏标签是观察窗，浏览器标签才是资源。** 关掉侧栏标签不关闭浏览器，只是这个 viewer 退订（重新打开会发现浏览器还在，若已死则在重连时自动换一个）；面板上的「关闭浏览器」走 `stop()`：**浏览器与这个侧栏标签一起关**，并且此后 **viewer 重新订阅不再把它拉起来**——"用户关的"和"它死了"必须分开，`openStreamForViewers()` 见 `userClosed` 就返回，而 `ensure()`（工具、restart、改启动项）会清掉这个标记。反过来，**agent 起浏览器时侧栏自己打开**：客户端在"侧栏没有浏览器标签"时每 1.5 s 读一次 `/dsh-browser/status`，只对"没在跑 → 在跑"这个**变化**反应（`openTabIn` 会在同一步展开栏目），所以用户手动关掉的观察窗不会因为它已经在跑而被重新拉出来。理由与替代方案见[那一篇](.agents/notes/implemented/feature/2026-09-24-pane-follows-the-browser.md)。最后一条浏览器标签不可关（Chrome 关掉最后一个 tab 会退出整个进程）。
+- **浏览器只有一个字形。** `src/client/glyph.ts` 只做转出：侧栏标签与 guide 卡片用产品自带的 `IconGlobeOutlineRegular`，地址栏的 globe 用同一图标的 `Medium` 权重（与它旁边的锁一致）——不自己画第二个地球，因为 harness 内置的 Browser 标签画的就是这一个。`definition.ts` 把字形作为**入参**收下（`browserDefinition(…, icon)`）而不是 import 它，这样 `test/*.test.ts` 才能在 Node 的类型剥离下 import 那份定义（primitives 包的 CSS module 在那里加载不了）。**设置页导航的图标不在本仓库**：由 harness 的 `SettingsRoot.tsx` 按 section id 硬编码（未知 id 一律齿轮），`settings.section` 也没有 icon 字段——外部插件给不了自己的字形，这一处目前就是不统一。
 - **page 的稳定标识用 CDP `targetId`**，不用自己 mint 的 id：外部 DevTools / Playwright 附加时看到的是同一个 id。工具侧的 ref（`e1`）是**页面内的稳定标签**（见「快照的语义」），当前页有效，导航即失效。
 - **浏览器死亡不是异常，是常态。** `context.on('close')` 已接：用户关窗口、崩溃都会进 `closed` 并带原因，`ensure()` 会重新起一个。新增任何"持有浏览器句柄"的状态时，都要想它在 `forget()` 之后会怎样。
 - **screencast 属于一个 CDP 会话，不属于 viewer。** 换浏览器（重启按钮、崩溃恢复、改启动项）就换掉了 CDP 会话，**仍订阅的 viewer 不会自己恢复**——它只在"订阅数 0→1"时挂流。所以 `start()` 里在 `ready` 之后统一补挂（`await this.openStream()`），一处覆盖四条路径。踩过的坑：只在"面板被卸载重挂"的路径上验证，会看不到这个缺陷（切走再切回恰好触发了 0→1）。凡是动流生命周期的改动，回归测试要覆盖**不重挂面板**的情形。
@@ -36,20 +37,11 @@
 - 需要全仓范围时先用 `--glob` / `-t` 收窄文件类型，并且说清为什么必须全仓。找某个东西的位置时用 `rg -l` 只列文件，比打印匹配内容便宜。
 - 一律 `rg -n` 带行号，方便直接引用 `file:line`，不要事后再用 `sed`/`cat` 补行号。
 
-## 目标版本：先 0.1.5-rc.2，后迁 0.1.7
+## 目标版本：0.1.7-rc.1（已迁移）
 
-按仓库当前 checkout 的 **0.1.5-rc.2** 开发；功能基本完成后再适配 **0.1.7**（`0.1.7-alpha.1` / `0.1.7-alpha.2` 已发布，仓库只是还没切过去）。
+按仓库当前 checkout 的 **0.1.7-rc.1** 开发，`package.json` 的 peer 与 dev 依赖都是这个区间（`>=0.1.7-rc.1 <0.2.0`）。0.1.5-rc.2 时期列过的差异已不再是差异：`SidebarRightTabDefinition.multiple` / `keepMounted`、`ctx.browserUse`（`packages/browser-use`）、`ui-sidebar-terminal` / `ui-sidebar-browser` 都在这个 checkout 里（后两者 web-app 已装）。
 
-核对 API 之前先确认目标版本。两个版本差异已经造成过误判：
-
-| API | 0.1.5-rc.2 | 0.1.7-alpha.2 |
-|---|---|---|
-| `SidebarRightTabDefinition.multiple` / `keepMounted` | 无 | 有 |
-| `ctx.browserUse`（`@deepseek-ai/dsh-browser-use`） | 无 | 有，独占单 provider 槽位 |
-| `ui-sidebar-terminal` / `ui-sidebar-browser` | 无 | 有，web-app 已装 |
-| `cordis.patch.yml` 里 `ui-sidebar-right` 的行号 | 224 | 240 |
-
-**不要用本 checkout 的源码去否定一份写自 0.1.7 的计划**，反之亦然：仓库里查不到某个 API 只说明它不在这个版本，不等于它不存在。判存在性用 `npm view @deepseek-ai/<pkg> versions`，不要只靠本地 `rg`。
+**不要用本 checkout 的源码去否定另一份写自其它版本的说明**：仓库里查不到某个 API 只说明它不在这个版本，不等于它不存在。判存在性用 `npm view @deepseek-ai/<pkg> versions`，不要只靠本地 `rg`。
 
 ## 不要为宽泛搜索委派子代理
 
