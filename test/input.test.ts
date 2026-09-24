@@ -80,6 +80,100 @@ test('a key with no mapping fails naming the key and the alternative', async () 
   assert.equal(cdp.calls.length, 0)
 })
 
+test('a chord holds its modifiers down for both the press and the release', async () => {
+  const cdp = fakeCdp()
+  await dispatchInput(cdp.session, { type: 'key', key: 'Control+A' })
+  const events = cdp.method('Input.dispatchKeyEvent').map(call => call.params)
+  assert.deepEqual(events, [
+    { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2, type: 'rawKeyDown' },
+    { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2, type: 'keyUp' },
+  ])
+})
+
+test('a chord with a non-typing modifier produces no text, because a browser does not either', async () => {
+  const cdp = fakeCdp()
+  await dispatchInput(cdp.session, { type: 'key', key: 'Meta+Enter' })
+  const [down] = cdp.method('Input.dispatchKeyEvent').map(call => call.params)
+  assert.equal(down?.type, 'rawKeyDown')
+  assert.equal(down?.text, undefined)
+  assert.equal(down?.modifiers, 4)
+  assert.equal(down?.key, 'Enter')
+})
+
+test('shift alone still produces the character it would on a keyboard', async () => {
+  const cdp = fakeCdp()
+  await dispatchInput(cdp.session, { type: 'key', key: 'Shift+a' })
+  const [down] = cdp.method('Input.dispatchKeyEvent').map(call => call.params)
+  assert.equal(down?.key, 'A')
+  assert.equal(down?.text, 'A')
+  assert.equal(down?.modifiers, 8)
+  assert.equal(down?.type, 'keyDown')
+})
+
+test('a named key keeps its own text when a modifier that does not suppress it is held', async () => {
+  const cdp = fakeCdp()
+  await dispatchInput(cdp.session, { type: 'key', key: 'Shift+Enter' })
+  const [down] = cdp.method('Input.dispatchKeyEvent').map(call => call.params)
+  assert.equal(down?.text, '\r')
+  assert.equal(down?.modifiers, 8)
+})
+
+test('a bare character is pressed as the key it names', async () => {
+  const cdp = fakeCdp()
+  await dispatchInput(cdp.session, { type: 'key', key: 'a' })
+  const [down, up] = cdp.method('Input.dispatchKeyEvent').map(call => call.params)
+  assert.deepEqual(down, {
+    key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, type: 'keyDown', text: 'a',
+  })
+  assert.equal(up?.type, 'keyUp')
+})
+
+test('the modifiers a caller may name are accepted under the names a keyboard has for them', async () => {
+  const aliases = ['Ctrl+a', 'Command+a', 'Option+a']
+  const expected = [2, 4, 1]
+  for (const [index, chord] of aliases.entries()) {
+    const cdp = fakeCdp()
+    await dispatchInput(cdp.session, { type: 'key', key: chord })
+    assert.equal(cdp.method('Input.dispatchKeyEvent')[0]?.params['modifiers'], expected[index], chord)
+  }
+})
+
+test('modifiers combine into one bit field', async () => {
+  const cdp = fakeCdp()
+  await dispatchInput(cdp.session, { type: 'key', key: 'Control+Shift+A' })
+  const [down] = cdp.method('Input.dispatchKeyEvent').map(call => call.params)
+  assert.equal(down?.modifiers, 10)
+  assert.equal(down?.key, 'A')
+  assert.equal(down?.text, undefined)
+})
+
+test('a chord that names no key fails with a message about the chord', async () => {
+  const cdp = fakeCdp()
+  await assert.rejects(
+    () => dispatchInput(cdp.session, { type: 'key', key: 'Control' }),
+    /Control.*modifier with no key.*Control\+A/,
+  )
+  assert.equal(cdp.calls.length, 0)
+})
+
+test('a chord with an unknown modifier fails naming it and the ones that work', async () => {
+  const cdp = fakeCdp()
+  await assert.rejects(
+    () => dispatchInput(cdp.session, { type: 'key', key: 'Hyper+a' }),
+    /Hyper.*Control, Meta, Alt, Shift/,
+  )
+  assert.equal(cdp.calls.length, 0)
+})
+
+test('a chord that ends on its separator fails rather than pressing nothing', async () => {
+  const cdp = fakeCdp()
+  await assert.rejects(
+    () => dispatchInput(cdp.session, { type: 'key', key: 'Control+' }),
+    /Control\+/,
+  )
+  assert.equal(cdp.calls.length, 0)
+})
+
 test('fractions become pixels against the page viewport', () => {
   const message: InputMessage = { type: 'mouse', action: 'down', x: 0.5, y: 0.25 }
   assert.deepEqual(scaleToViewport(message, { width: 1000, height: 800 }), {

@@ -23,6 +23,27 @@ import type { BrowserSession, LaunchConfig } from '../../src/browser/launch.ts'
 import type { Launcher } from '../../src/browser/session-browser.ts'
 import { fakeCdp, type FakeCdp } from './cdp.ts'
 
+/** One dialog a fake page opened, and what the plugin answered. */
+export interface FakeDialog {
+  /** The kind of dialog, as Playwright reports it. */
+  type(): string
+  /** What the page asks. */
+  message(): string
+  /** What a prompt offers as its default, empty for the other kinds. */
+  defaultValue(): string
+  /**
+   * Accept the dialog.
+   * @param text - what a prompt is answered with.
+   */
+  accept(text?: string): Promise<void>
+  /** Dismiss the dialog. */
+  dismiss(): Promise<void>
+  /** What the plugin answered, or `undefined` while it has not answered. */
+  readonly handled: 'accepted' | 'dismissed' | undefined
+  /** The text the plugin accepted a prompt with. */
+  readonly answer: string | undefined
+}
+
 /** One page in a fake browser. */
 export interface FakePage {
   /** The recorded page, for the plugin to use. */
@@ -46,6 +67,17 @@ export interface FakePage {
    * @param args - event payload.
    */
   emit(event: string, ...args: unknown[]): void
+  /**
+   * Open a dialog on this page, the way `alert()` or `confirm()` would.
+   *
+   * The plugin has to answer it while it is open — a page that never gets an
+   * answer never runs again — so the record is what says which way it answered.
+   * @param type - `alert`, `confirm`, `prompt`, or `beforeunload`.
+   * @param message - what the page asks.
+   * @param defaultValue - what a prompt offers as its default.
+   * @returns the dialog's record.
+   */
+  dialog(type: string, message: string, defaultValue?: string): FakeDialog
 }
 
 /** One browser a fake launch produced. */
@@ -194,6 +226,21 @@ export function fakeLauncher(): FakeLaunch {
         get closed() { return pageClosed },
         emit: (event, ...args) => {
           for (const listener of handlers.get(event) ?? []) listener(...args)
+        },
+        dialog: (type, message, defaultValue = '') => {
+          let handled: 'accepted' | 'dismissed' | undefined
+          let answer: string | undefined
+          const opened: FakeDialog = {
+            type: () => type,
+            message: () => message,
+            defaultValue: () => defaultValue,
+            accept: async (text?: string) => { handled = 'accepted'; answer = text },
+            dismiss: async () => { handled = 'dismissed' },
+            get handled() { return handled },
+            get answer() { return answer },
+          }
+          record.emit('dialog', opened)
+          return opened
         },
       }
       pages.push(record)

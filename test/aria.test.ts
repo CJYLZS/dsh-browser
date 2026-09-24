@@ -14,7 +14,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { formatAxTree, RefLabels, type AxNode } from '../src/browser/aria.ts'
+import { formatAxTree, parseQuery, RefLabels, type AxNode } from '../src/browser/aria.ts'
 
 /**
  * Build one tree node.
@@ -426,4 +426,87 @@ test('a label can be re-pointed at the node that replaced it', () => {
   labels.rebind('e2', { backendNodeId: 77, role: 'button', name: 'Sign in' })
   assert.deepEqual(labels.targetOf('e2'), { backendNodeId: 77, role: 'button', name: 'Sign in' })
   assert.equal(labels.targetOf('e1')?.backendNodeId, 31)
+})
+
+/** A page with a navigation and a result list, only one result of which is wanted. */
+const RESULTS: AxNode[] = [
+  node({ nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Search' }, childIds: ['2', '3'] }),
+  node({ nodeId: '2', role: { value: 'navigation' }, name: { value: 'Main' }, childIds: ['2a'] }),
+  node({ nodeId: '2a', role: { value: 'link' }, name: { value: 'Home' }, backendDOMNodeId: 21 }),
+  node({ nodeId: '3', role: { value: 'list' }, childIds: ['3a', '3b'] }),
+  node({ nodeId: '3a', role: { value: 'listitem' }, childIds: ['3a1'] }),
+  node({
+    nodeId: '3a1',
+    role: { value: 'link' },
+    name: { value: 'Codex documentation' },
+    properties: [{ name: 'url', value: { value: 'https://example.test/codex' } }],
+    backendDOMNodeId: 31,
+  }),
+  node({ nodeId: '3b', role: { value: 'listitem' }, childIds: ['3b1'] }),
+  node({ nodeId: '3b1', role: { value: 'link' }, name: { value: 'Anything else' }, backendDOMNodeId: 32 }),
+]
+
+test('a query keeps the match and the path to it, and drops the rest', () => {
+  const snapshot = formatAxTree(RESULTS, { find: parseQuery('codex') })
+  const lines = snapshot.text.split('\n').filter(line => line !== '' && !line.startsWith('…'))
+  // The path is what makes a match readable: a link alone does not say which
+  // list it belongs to. A `listitem` that groups one node prints in neither a
+  // full snapshot nor this one, so a match sits at the same depth either way.
+  assert.deepEqual(lines, [
+    '- RootWebArea "Search"',
+    '  - list',
+    '    - link "Codex documentation" url="https://example.test/codex" [ref=e1]',
+  ])
+})
+
+test('a query says how to read the subtree behind a match', () => {
+  const snapshot = formatAxTree(RESULTS, { find: parseQuery('codex') })
+  assert.match(snapshot.text, /1 node matches "codex"/)
+  assert.match(snapshot.text, /target=/)
+})
+
+test('a query tested with a regular expression matches what a substring would not', () => {
+  const snapshot = formatAxTree(RESULTS, { find: parseQuery('/codex.*documentation/i') })
+  assert.match(snapshot.text, /Codex documentation/)
+  const missed = formatAxTree(RESULTS, { find: parseQuery('/^Codex$/') })
+  assert.doesNotMatch(missed.text, /Codex documentation/)
+})
+
+test('a query that matches nothing says so rather than reading as an empty page', () => {
+  const snapshot = formatAxTree(RESULTS, { find: parseQuery('nothing here') })
+  assert.match(snapshot.text, /Nothing in the page matches "nothing here"/)
+  assert.equal(snapshot.nodes, 0)
+})
+
+test('a query is tested against the properties a line prints, not only its name', () => {
+  const snapshot = formatAxTree(RESULTS, { find: parseQuery('example.test/codex') })
+  assert.match(snapshot.text, /Codex documentation/)
+})
+
+test('text split across sibling runs is matched as the one line it prints as', () => {
+  // A model searching for a phrase reads it in the snapshot as one line; the
+  // page wrote it as several text nodes, and a query has to see the same words.
+  const page = [
+    node({ nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Page' }, childIds: ['2'] }),
+    node({ nodeId: '2', role: { value: 'paragraph' }, childIds: ['2a', '2b', '2c'] }),
+    node({ nodeId: '2a', role: { value: 'StaticText' }, name: { value: 'Sign in to ' } }),
+    node({ nodeId: '2b', role: { value: 'StaticText' }, name: { value: 'continue' } }),
+    node({ nodeId: '2c', role: { value: 'StaticText' }, name: { value: ' reading' } }),
+  ]
+  const whole = formatAxTree(page)
+  assert.match(whole.text, /StaticText "Sign in to continue reading"/)
+  const found = formatAxTree(page, { find: parseQuery('continue reading') })
+  assert.match(found.text, /StaticText "Sign in to continue reading"/)
+})
+
+test('a box is printed beside the element it belongs to, in viewport pixels', () => {
+  const boxes = new Map([[31, { x: 120, y: 340, width: 80, height: 24 }]])
+  const snapshot = formatAxTree(RESULTS, { boxes })
+  assert.match(
+    snapshot.text,
+    /- link "Codex documentation" url="[^"]*" \[ref=e\d+\] box=120,340 80x24/,
+  )
+  // An element the page reported no box for prints without one rather than
+  // with a box of zeroes, which would read as an element at the page's corner.
+  assert.doesNotMatch(snapshot.text, /Home.*box=/)
 })

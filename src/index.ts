@@ -16,11 +16,13 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import type {} from '@deepseek-ai/dsh-skill'
 import { BrowserPool } from './browser/pool.ts'
 import { registerStream } from './view/server.ts'
 import { registerStatus } from './view/status.ts'
 import { registerTools } from './tools/index.ts'
 import { installSettings } from './settings.ts'
+import { browserSkill } from './skill.ts'
 import { Config, plainConfig, type BrowserConfig, type BrowserConfigInput } from './config.ts'
 
 export { Config, plainConfig }
@@ -58,4 +60,21 @@ export function apply(ctx: Context, config: BrowserConfigInput): void {
   registerStream(ctx, pool)
   registerStatus(ctx, pool)
   registerTools(ctx, pool)
+  // The guidance is contributed as a skill rather than as more tool
+  // description: it is worth reading once per task, not once per call. A
+  // profile that mounts no skill registry keeps the tools and loses only the
+  // words, which is why this is injected rather than required.
+  ctx.inject(['skills'], (scoped) => {
+    scoped.effect(() => {
+      try {
+        return scoped.skills.register(browserSkill())
+      } catch (error) {
+        // A guidance file that cannot be read leaves a usable plugin: the tools
+        // carry their own contracts, and losing the browser over a missing
+        // paragraph would be the worse failure. The warning names the file.
+        scoped.logger.warn(error instanceof Error ? error : new Error(String(error)))
+        return () => {}
+      }
+    }, 'dsh-browser: skill')
+  })
 }

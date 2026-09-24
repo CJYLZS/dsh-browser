@@ -4,8 +4,9 @@
  *
  * Input leaves as fractions of the frame rather than pixels, so the host never
  * needs to know the viewer's size and resizing the Sidebar cannot shift a
- * click. Printable keys go as text and named keys as key events, mirroring how
- * the host dispatches them.
+ * click. Printable keys go as text, named keys as key events, and a keystroke
+ * held with a modifier as the chord it is — Ctrl+A selects the page, it does not
+ * type an "a" — mirroring how the host dispatches them.
  *
  * Styles are inline: this plugin builds its client bundle outside the
  * repository's stylesheet pipeline, so a CSS import would have no owner.
@@ -85,6 +86,26 @@ function buttonOf(button: number): 'left' | 'middle' | 'right' {
   if (button === 1) return 'middle'
   if (button === 2) return 'right'
   return 'left'
+}
+
+/**
+ * The modifiers a key event is holding, spelled the way the host's key messages
+ * spell them.
+ * @param event - the key event.
+ * @returns the modifier names, in the order a chord writes them.
+ */
+function modifiersOf(event: {
+  readonly ctrlKey: boolean
+  readonly metaKey: boolean
+  readonly altKey: boolean
+  readonly shiftKey: boolean
+}): string[] {
+  const held: string[] = []
+  if (event.ctrlKey) held.push('Control')
+  if (event.metaKey) held.push('Meta')
+  if (event.altKey) held.push('Alt')
+  if (event.shiftKey) held.push('Shift')
+  return held
 }
 
 /** Height of the address bar, which its pill radius is derived from. */
@@ -438,13 +459,22 @@ export function BrowserBody({ sessionId, t }: BrowserBodyProps): ReactNode {
             sendInput({ type: 'wheel', x: at.x, y: at.y, deltaX: event.deltaX, deltaY: event.deltaY })
           }}
           onKeyDown={(event) => {
-            if (event.key.length === 1) {
+            // AltGr arrives as Control+Alt on Windows and still produces a
+            // character — a German or Polish layout types its symbols that way
+            // — so sending it as a chord would deliver the keystroke and
+            // swallow the character the user meant to type.
+            const altGraph = event.ctrlKey && event.altKey && event.key.length === 1
+            // A chord is a keystroke, not text. Sending Ctrl+A as the character
+            // "a" is what this used to do: a page that selects everything on
+            // Ctrl+A had an "a" typed into it instead.
+            const chord = (event.ctrlKey || event.metaKey || event.altKey) && !altGraph
+            if (event.key.length === 1 && !chord) {
               sendInput({ type: 'text', text: event.key })
               event.preventDefault()
               return
             }
-            if (NAMED_KEYS.includes(event.key)) {
-              sendInput({ type: 'key', key: event.key })
+            if (chord || NAMED_KEYS.includes(event.key)) {
+              sendInput({ type: 'key', key: [...modifiersOf(event), event.key].join('+') })
               event.preventDefault()
             }
           }}

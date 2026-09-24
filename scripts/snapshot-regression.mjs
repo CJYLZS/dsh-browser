@@ -104,6 +104,41 @@ const TYPING_FIXTURE = `<!doctype html><meta charset="utf-8"><title>typing fixtu
 <input id="fixed" placeholder="locked" readonly>
 <input id="free" placeholder="free">`
 
+/**
+ * A page that asks before it does anything, and writes down the answer.
+ *
+ * A dialog is invisible to every other way of reading a page: it is not in the
+ * accessibility tree, it changes no DOM, and the renderer is blocked until it is
+ * answered. The page's own text is what the checks read, so the report and the
+ * page have to agree about what was answered.
+ */
+const DIALOG_FIXTURE = `<!doctype html><meta charset="utf-8"><title>dialog fixture</title>
+<h1>Dialog fixture</h1>
+<button id="ask" onclick="document.querySelector('#said').textContent = String(confirm('Delete this item?'))">Confirm</button>
+<button id="name" onclick="document.querySelector('#said').textContent = String(prompt('Your name?', 'Anonymous'))">Prompt</button>
+<p id="said">nothing yet</p>`
+
+/**
+ * A page that writes down every key and mouse gesture it receives.
+ *
+ * The field's value is the half that matters: an "a" typed into the field
+ * instead of Ctrl+A leaves the text changed, so a chord that never reached the
+ * page as a chord is distinguishable from one that did. The listener runs in
+ * the capture phase, before anything on the page can consume the key.
+ */
+const KEYS_FIXTURE = `<!doctype html><meta charset="utf-8"><title>keys fixture</title>
+<h1>Keys fixture</h1>
+<input id="field" aria-label="field" value="hello">
+<p id="log">nothing yet</p>
+<script>
+  const written = (what) => { document.querySelector('#log').textContent = what };
+  document.addEventListener('keydown', (event) => {
+    written('down ' + (event.ctrlKey ? 'Control+' : '') + (event.shiftKey ? 'Shift+' : '') + event.key);
+  }, true);
+  document.querySelector('#field').addEventListener('contextmenu', () => written('contextmenu'));
+  document.querySelector('#field').addEventListener('dblclick', () => written('dblclick'));
+</script>`
+
 const t0 = Date.now()
 const results = []
 
@@ -470,6 +505,117 @@ async function main() {
       check('a field that can hold text still gets it',
         freeValue === 'hello' && typed.element.role === 'textbox' && typed.element.name === 'free',
         `${JSON.stringify(freeValue)} into ${typed.element.role} ${JSON.stringify(typed.element.name)}`)
+    }
+
+    log('\n[19] a query and boxes on the real page')
+    await step('back to the real page', 60_000, () => browser.navigate(URL_ARG))
+    const whole = await step('snapshot for comparison', 60_000, () => browser.snapshot())
+    // The first accessible name a line carries, not the url beside it: a query
+    // is what a reader would search for, and a whole line with its attributes is
+    // not a thing any page would match.
+    const wanted = whole.text.split('\n')
+      .map(line => /^\s*- \S+ "(.*?)"/.exec(line)?.[1] ?? '')
+      .find(name => name.length >= 6 && name.length <= 40) ?? 'a'
+    const found = await step('snapshot with a query', 60_000, () => browser.snapshot({ find: wanted }))
+    check('a query answers with the paths to its matches instead of the page',
+      found.nodes > 0 && found.nodes < whole.nodes && found.text.includes(wanted),
+      `${String(found.nodes)} of ${String(whole.nodes)} nodes for ${JSON.stringify(wanted)}`)
+
+    const boxed = await step('snapshot with boxes', 60_000, () => browser.snapshot({ boxes: true }))
+    const printedLine = boxed.text.split('\n').find(line => /- heading "[^"]*" level="1"[^\n]*box=/.test(line))
+    const printed = /- heading "[^"]*" level="1"[^\n]*box=(-?\d+),(-?\d+) (\d+)x(\d+)/.exec(boxed.text)
+    // The one claim a recording CDP session cannot settle: which coordinate
+    // space a printed box is in. The page is asked for the same element's own
+    // rectangle, so the two answers have to be the same numbers.
+    const measured = await step('measure the same heading in the page', 30_000, () => browser.evaluate(
+      '(() => { const heading = document.querySelector("h1"); if (heading === null) return null; '
+      + 'const box = heading.getBoundingClientRect(); '
+      + 'return [Math.round(box.x), Math.round(box.y), Math.round(box.width), Math.round(box.height)]; })()',
+    ))
+    check('a printed box is the element box in viewport pixels',
+      printed !== null && Array.isArray(measured)
+        && Number(printed[1]) === measured[0] && Number(printed[2]) === measured[1]
+        && Number(printed[3]) === measured[2] && Number(printed[4]) === measured[3],
+      `${printedLine ?? 'no heading carried a box'} against the page ${JSON.stringify(measured)}`)
+
+    log('\n[20] a dialog a click opens is answered and reported')
+    const dialogUrl = `data:text/html;charset=utf-8,${encodeURIComponent(DIALOG_FIXTURE)}`
+    await step('navigate to the dialog fixture', 30_000, () => browser.navigate(dialogUrl))
+    const dialogTree = await step('dialog fixture snapshot', 30_000, () => browser.snapshot())
+    const confirmRef = refFor(dialogTree.text, /"Confirm"/)
+    const promptRef = refFor(dialogTree.text, /"Prompt"/)
+    if (confirmRef === undefined || promptRef === undefined) {
+      check('both dialog buttons have a ref to click', false,
+        `confirm ${String(confirmRef)}, prompt ${String(promptRef)}`)
+    } else {
+      const dismissed = await step('click under the default answer', 30_000, () => browser.click(confirmRef))
+      const saidThen = await step('read what the page was told', 30_000,
+        () => browser.evaluate('document.querySelector("#said").textContent'))
+      check('a dismissed dialog is reported instead of vanishing',
+        dismissed.dialogs?.[0]?.handled === 'dismissed'
+          && dismissed.dialogs?.[0]?.type === 'confirm'
+          && dismissed.changed.includes('dialog'),
+        JSON.stringify(dismissed.dialogs ?? null))
+      check('the page received the dismissal the report names', saidThen === 'false', JSON.stringify(saidThen))
+
+      const accepted = await step('click under a declared accept', 30_000,
+        () => browser.click(confirmRef, { dialog: { action: 'accept' } }))
+      const saidAccept = await step('read what the page was told this time', 30_000,
+        () => browser.evaluate('document.querySelector("#said").textContent'))
+      check('a declared accept reaches the page',
+        accepted.dialogs?.[0]?.handled === 'accepted' && saidAccept === 'true',
+        `${JSON.stringify(accepted.dialogs ?? null)} with the page saying ${JSON.stringify(saidAccept)}`)
+
+      const answered = await step('answer a prompt with text', 30_000,
+        () => browser.click(promptRef, { dialog: { action: 'accept', text: 'Ada' } }))
+      const saidName = await step('read the prompt answer', 30_000,
+        () => browser.evaluate('document.querySelector("#said").textContent'))
+      check('a prompt is accepted with the text the call declared',
+        answered.dialogs?.[0]?.answer === 'Ada' && saidName === 'Ada',
+        `${JSON.stringify(answered.dialogs ?? null)} with the page saying ${JSON.stringify(saidName)}`)
+    }
+
+    log('\n[21] keys and mouse gestures a page only answers to as gestures')
+    const keysUrl = `data:text/html;charset=utf-8,${encodeURIComponent(KEYS_FIXTURE)}`
+    await step('navigate to the keys fixture', 30_000, () => browser.navigate(keysUrl))
+    const keysTree = await step('keys fixture snapshot', 30_000, () => browser.snapshot())
+    const fieldRef = refFor(keysTree.text, /"field"/)
+    if (fieldRef === undefined) {
+      check('the field has a ref to focus', false, 'no line named "field"')
+    } else {
+      await step('focus the field', 30_000, () => browser.type(fieldRef, 'hello'))
+      await step('press Control+A', 30_000, () => browser.press('Control+A'))
+      const afterChord = await step('read the field and its selection', 30_000, () => browser.evaluate(
+        '(() => { const field = document.querySelector("#field"); '
+        + 'return { value: field.value, from: field.selectionStart, to: field.selectionEnd, '
+        + 'log: document.querySelector("#log").textContent }; })()',
+      ))
+      check('a chord reaches the page with its modifier',
+        afterChord?.log === 'down Control+a', JSON.stringify(afterChord?.log))
+      check('Ctrl+A selects the field instead of typing an "a"',
+        afterChord?.value === 'hello' && afterChord?.from === 0 && afterChord?.to === 5,
+        JSON.stringify(afterChord))
+
+      const rightClicked = await step('right-click the field', 30_000,
+        () => browser.click(fieldRef, { button: 'right' }))
+      const afterRight = await step('read the menu record', 30_000,
+        () => browser.evaluate('document.querySelector("#log").textContent'))
+      check('a right click arrives as a context menu request', afterRight === 'contextmenu',
+        `${JSON.stringify(afterRight)} on ${rightClicked.element?.role ?? 'unknown'}`)
+
+      await step('double-click the field', 30_000, () => browser.click(fieldRef, { double: true }))
+      const afterDouble = await step('read the double-click record', 30_000,
+        () => browser.evaluate('document.querySelector("#log").textContent'))
+      check('a double click arrives as one double click', afterDouble === 'dblclick', JSON.stringify(afterDouble))
+
+      await step('press Escape with no element', 30_000, () => browser.press('Escape'))
+      const afterEscape = await step('read the key record', 30_000,
+        () => browser.evaluate('document.querySelector("#log").textContent'))
+      const focusKept = await step('read the focused element', 30_000,
+        () => browser.evaluate('document.activeElement?.id'))
+      check('a key pressed with no ref goes to the page and leaves the focus alone',
+        afterEscape === 'down Escape' && focusKept === 'field',
+        `${JSON.stringify(afterEscape)} with the focus on ${JSON.stringify(focusKept)}`)
     }
 
   } finally {

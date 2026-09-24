@@ -138,3 +138,51 @@ test('a page list says which page the tools act on, or that there are none', () 
   assert.equal(tabsText(TABS), '[0] https://example.test/first\n[active] https://example.test/second')
   assert.equal(tabsText([]), 'No pages are open.')
 })
+
+test('a result says which dialog the page asked and how it was answered', () => {
+  const text = actionText('Clicked button "Delete"', report({
+    changed: ['dialog'],
+    dialogs: [{ type: 'confirm', message: 'Delete this item?', defaultValue: '', handled: 'dismissed' }],
+  }), TABS)
+  assert.match(text, /A confirm dialog asked "Delete this item\?" and was dismissed\./)
+  // The model's next move is the one that matters: dismissing is the answer
+  // that changes nothing, and a call can only answer a dialog it announced.
+  assert.match(text, /Pass dialog: "accept" on the call that opens it/)
+})
+
+test('a prompt that was accepted says what it was answered with', () => {
+  const text = actionText('Clicked button "Rename"', report({
+    dialogs: [{
+      type: 'prompt',
+      message: 'Your name?',
+      defaultValue: 'Anonymous',
+      handled: 'accepted',
+      answer: 'Ada',
+    }],
+  }), TABS)
+  assert.match(text, /A prompt dialog asked "Your name\?" and was accepted with "Ada"\./)
+})
+
+test('a dialog nobody had to answer differently carries no advice about answering it', () => {
+  const text = actionText('Clicked button "Delete"', report({
+    dialogs: [{ type: 'confirm', message: 'Delete this item?', defaultValue: '', handled: 'accepted' }],
+  }), TABS)
+  assert.match(text, /and was accepted\./)
+  assert.doesNotMatch(text, /Pass dialog/)
+})
+
+test('a result that met no dialog says nothing about dialogs', () => {
+  const text = actionText('Clicked button "Send"', report({ changed: ['dom'] }), TABS)
+  assert.doesNotMatch(text, /dialog/)
+})
+
+test('a snapshot result carries a dialog the page opened while it was being read', () => {
+  const text = snapshotText({
+    info: 'Page info: 1440x900 viewport, page 1440x900 — the whole page is in view',
+    text: '- RootWebArea "Form"',
+    dialogs: [{ type: 'alert', message: 'Session expiring', defaultValue: '', handled: 'dismissed' }],
+    tabs: TABS,
+  })
+  assert.match(text, /A alert dialog asked "Session expiring" and was dismissed\./)
+  assert.match(text, /- RootWebArea "Form"/)
+})

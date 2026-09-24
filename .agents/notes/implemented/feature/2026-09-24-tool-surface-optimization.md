@@ -56,6 +56,8 @@ Status: implemented
 | P2 | skill + 懒注册工具 schema | `src/index.ts` | schema 不常驻 system prompt |
 | P2 | README「能力边界」一节 | `README.md` / `README.zh.md` | 与 page-agent 的 limitations 一节同规格 |
 
+后续一轮补上了这张表里"响应纪律（find / 按引用）"缺的那一半：`browser_snapshot` 新增 `find`（文本或 `/pattern/flags`，只回匹配节点与它在树里的路径）与 `boxes`（每个会打印的元素的视口坐标，与点击落点同源，都是 `DOM.getContentQuads`）。同一决定，理由与真机数字见[对照补齐那一篇](2026-09-24-dialogs-chords-and-parity-round.md)。
+
 ## 明确不做
 
 - **不抄 page-agent 的"每步重取整页文档"**：它是长页面上最大的开销来源；我们已有 `maxNodes`，继续走"按需 + 按引用"。
@@ -113,7 +115,7 @@ TDD：先写失败用例，再改实现；`pnpm run typecheck && pnpm test && pn
 
 ## 这一轮仍然没做
 
-- P2：skill + 懒注册工具 schema；README「能力边界」一节。
+- P2：懒注册工具 schema（**技能本身已落地**，见[对照补齐那一篇](2026-09-24-dialogs-chords-and-parity-round.md)，但六个工具的 schema 仍常驻 system prompt）；README「能力边界」一节。
 - 快照头里"可滚动容器还剩多少"（结论表里是 P1、优先级表里没列）：需要逐元素 `scrollHeight > clientHeight`，一次 in-page 扫描拿不到 backendNodeId，成本与收益不划算，继续等真实需求。
 - `file:true` 的自动触发阈值定在 40k 字符（约 12k token），没有做成"按 token 预算"：插件的单次结果保持小，压缩归宿主。
 

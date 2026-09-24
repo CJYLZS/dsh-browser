@@ -717,3 +717,150 @@ test('a browser that does not answer a cancelled call is dropped for a fresh one
   await browser.ensure()
   assert.equal(launch.browsers.length, 2)
 })
+
+test('a right click presses the right button, so the page sees a context menu request', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  await browser.click('e2', { button: 'right' })
+  assert.deepEqual(pointerCalls(page).slice(1), [
+    { type: 'mousePressed', x: 20, y: 30, button: 'right', clickCount: 1 },
+    { type: 'mouseReleased', x: 20, y: 30, button: 'right', clickCount: 1 },
+  ])
+})
+
+test('a double click sends the two press-release pairs a browser sends', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  await browser.click('e2', { double: true })
+  // The second pair carries click count 2, which is what makes the page treat
+  // the two as one double click rather than two clicks.
+  assert.deepEqual(pointerCalls(page).slice(1), [
+    { type: 'mousePressed', x: 20, y: 30, button: 'left', clickCount: 1 },
+    { type: 'mouseReleased', x: 20, y: 30, button: 'left', clickCount: 1 },
+    { type: 'mousePressed', x: 20, y: 30, button: 'left', clickCount: 2 },
+    { type: 'mouseReleased', x: 20, y: 30, button: 'left', clickCount: 2 },
+  ])
+})
+
+test('a key pressed with no element goes to wherever the page has focus', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  await browser.press('Escape')
+  // Pressing a key is not typing: naming no element leaves the focus alone and
+  // replaces nothing, which is what makes Escape close a menu the page opened.
+  assert.deepEqual(page.cdp.method('DOM.focus'), [], 'a key press moved the focus')
+  assert.deepEqual(page.cdp.method('Input.insertText'), [], 'a key press inserted text')
+  assert.deepEqual(
+    page.cdp.method('Input.dispatchKeyEvent').map(call => call.params['type']),
+    ['rawKeyDown', 'keyUp'],
+  )
+})
+
+test('a chord pressed with no element carries its modifiers', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  await browser.press('Control+A')
+  const events = page.cdp.method('Input.dispatchKeyEvent').map(call => call.params)
+  assert.equal(events[0]?.['modifiers'], 2)
+  assert.equal(events[0]?.['key'], 'a')
+})
+
+test('a dialog a click opens is answered, reported, and never left open', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  let opened: ReturnType<FakePage['dialog']> | undefined
+  page.cdp.answers.set('Input.dispatchMouseEvent', (params: Record<string, unknown>) => {
+    if (params['type'] === 'mousePressed') opened = page.dialog('confirm', 'Delete this item?')
+    return {}
+  })
+  const report = await browser.click('e2')
+  // A page that never gets an answer never runs again, so leaving it open is
+  // not an option; dismissing is the answer that changes nothing, and the
+  // report is what stops it from being invisible.
+  assert.equal(opened?.handled, 'dismissed')
+  assert.deepEqual(report.dialogs, [{
+    type: 'confirm',
+    message: 'Delete this item?',
+    defaultValue: '',
+    handled: 'dismissed',
+  }])
+  assert.deepEqual(report.changed, ['dialog'], 'the dialog was not reported as the change it was')
+})
+
+test('a call that declares it will accept answers the dialog that way', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  let opened: ReturnType<FakePage['dialog']> | undefined
+  page.cdp.answers.set('Input.dispatchMouseEvent', (params: Record<string, unknown>) => {
+    if (params['type'] === 'mousePressed') opened = page.dialog('confirm', 'Delete this item?')
+    return {}
+  })
+  const report = await browser.click('e2', { dialog: { action: 'accept' } })
+  assert.equal(opened?.handled, 'accepted')
+  assert.equal(report.dialogs?.[0]?.handled, 'accepted')
+})
+
+test('a prompt is accepted with the text the call declared', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  let opened: ReturnType<FakePage['dialog']> | undefined
+  page.cdp.answers.set('Input.dispatchMouseEvent', (params: Record<string, unknown>) => {
+    if (params['type'] === 'mousePressed') opened = page.dialog('prompt', 'Your name?', 'Anonymous')
+    return {}
+  })
+  const report = await browser.click('e2', { dialog: { action: 'accept', text: 'Ada' } })
+  assert.equal(opened?.answer, 'Ada')
+  assert.equal(report.dialogs?.[0]?.answer, 'Ada')
+  assert.equal(report.dialogs?.[0]?.defaultValue, 'Anonymous')
+})
+
+test('a dialog opened while the page is idle is kept until a tool reports it', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.dialog('alert', 'Your session is expiring')
+  const reported = browser.takeDialogs()
+  assert.deepEqual(reported.map(dialog => dialog.message), ['Your session is expiring'])
+  assert.equal(reported[0]?.handled, 'dismissed', 'an unannounced dialog must still be answered')
+  assert.deepEqual(browser.takeDialogs(), [], 'the same dialog was reported twice')
+})
+
+test('a call that met no dialog carries no dialogs and no dialog change', async () => {
+  const { browser } = await started()
+  await browser.snapshot()
+  const report = await browser.click('e2')
+  assert.equal(report.dialogs, undefined)
+  assert.deepEqual(report.changed, [])
+})
+
+test('a snapshot asked for boxes prints where each element is, in viewport pixels', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('DOM.getContentQuads', (params: Record<string, unknown>) => (
+    params['backendNodeId'] === 21
+      ? { quads: [[100, 200, 300, 200, 300, 240, 100, 240]] }
+      : { quads: [[100, 300, 180, 300, 180, 330, 100, 330]] }
+  ))
+  const snapshot = await browser.snapshot({ boxes: true })
+  assert.match(snapshot.text, /- textbox "Email" \[ref=e1\] box=100,200 200x40/)
+  assert.match(snapshot.text, /- button "Send" \[ref=e2\] box=100,300 80x30/)
+  // Asking where the elements are must not spend or renumber the page's refs.
+  assert.equal(snapshot.refs.get('e1'), 21)
+  assert.equal(snapshot.refs.get('e2'), 31)
+})
+
+test('a snapshot asked for a query and for boxes asks the page only about what it prints', async () => {
+  const { browser, page } = await started()
+  const snapshot = await browser.snapshot({ find: 'Send', boxes: true })
+  assert.match(snapshot.text, /button "Send"/)
+  assert.doesNotMatch(snapshot.text, /Email/)
+  const asked = page.cdp.method('DOM.getContentQuads').map(call => call.params['backendNodeId'])
+  assert.deepEqual([...new Set(asked)], [31], 'a box was measured for an element the snapshot does not print')
+})
+
+test('a snapshot narrowed by a query still names refs the page can be acted on with', async () => {
+  const { browser, page } = await started()
+  const snapshot = await browser.snapshot({ find: 'Send' })
+  const ref = /\[ref=(e\d+)\]/.exec(snapshot.text)?.[1]
+  assert.ok(ref !== undefined, 'the match carried no ref to click')
+  await browser.click(ref)
+  assert.equal(page.cdp.method('Input.dispatchMouseEvent').length, 3)
+})

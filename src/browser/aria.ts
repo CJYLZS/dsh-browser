@@ -74,6 +74,73 @@ export interface SnapshotTarget {
   readonly described: string
 }
 
+/** One element's box, in the coordinates input is dispatched in. */
+export interface Box {
+  /** Distance from the viewport's left edge, in CSS pixels. */
+  readonly x: number
+  /** Distance from the viewport's top edge, in CSS pixels. */
+  readonly y: number
+  /** Width in CSS pixels. */
+  readonly width: number
+  /** Height in CSS pixels. */
+  readonly height: number
+}
+
+/**
+ * A question a snapshot answers, instead of printing the whole page.
+ *
+ * A query is tested against what a line says — role, name, value, and the
+ * properties the whitelist prints — so the words a reader can see in a snapshot
+ * are the words it can search for.
+ */
+export interface SnapshotQuery {
+  /** The query as the caller wrote it, for the text that reports a miss. */
+  readonly described: string
+  /**
+   * Whether what one node says answers the query.
+   * @param fields - what the node says, as the lines that print it say it.
+   * @returns whether it matches.
+   */
+  matches(fields: readonly string[]): boolean
+}
+
+/**
+ * Read a query the way the tool's `find` parameter writes one.
+ *
+ * A query wrapped in slashes is a regular expression, for the cases a substring
+ * cannot express — `/(sign|log) ?in/i` — and anything else is a substring,
+ * matched without regard to case, because a page's capitalisation is not
+ * something a caller should have to reproduce from memory.
+ * @param query - what the caller asked for.
+ * @returns the query to test nodes with.
+ * @throws {Error} when a `/…/` query is not a valid expression.
+ */
+export function parseQuery(query: string): SnapshotQuery {
+  const asRegex = /^\/(.*)\/([a-z]*)$/su.exec(query)
+  if (asRegex === null) {
+    const needle = query.toLowerCase()
+    return {
+      described: query,
+      matches: fields => fields.some(field => field.toLowerCase().includes(needle)),
+    }
+  }
+  const source = asRegex[1] ?? ''
+  // `g` and `y` make `test` remember where the last call stopped, so the same
+  // query would answer differently for every other node it was tried against.
+  const flags = (asRegex[2] ?? '').replace(/[gy]/gu, '')
+  let expression: RegExp
+  try {
+    expression = new RegExp(source, flags.includes('i') ? flags : `${flags}i`)
+  } catch (error) {
+    throw new Error(
+      `dsh-browser: ${query} is not a regular expression `
+      + `(${error instanceof Error ? error.message : String(error)}); `
+      + 'write plain text to match a substring, or /pattern/flags for an expression',
+    )
+  }
+  return { described: query, matches: fields => fields.some(field => expression.test(field)) }
+}
+
 /** What one snapshot produced. */
 export interface AxSnapshot {
   /** The tree as text, one node per line. */
@@ -102,6 +169,10 @@ export interface SnapshotOptions {
   readonly ignore?: ReadonlySet<number>
   /** Accessibility properties to print, in this order. */
   readonly attributes?: readonly string[]
+  /** Print only what matches this query, with the path that leads to it. */
+  readonly find?: SnapshotQuery
+  /** Boxes to print beside the elements they belong to, by DOM node. */
+  readonly boxes?: ReadonlyMap<number, Box>
   /** The page's label registry; omit for a throwaway one. */
   readonly labels?: RefLabels
 }
@@ -213,7 +284,13 @@ function attributesOf(node: AxNode, whitelist: readonly string[]): [string, stri
 }
 
 /** One node rendered as its own line, without indentation. */
-function lineOf(node: AxNode, ref: string | undefined, whitelist: readonly string[], fresh: boolean): string {
+function lineOf(
+  node: AxNode,
+  ref: string | undefined,
+  whitelist: readonly string[],
+  fresh: boolean,
+  box?: Box,
+): string {
   const name = nameOf(node)
   const value = text(node.value?.value)
   let line = `- ${roleOf(node)}`
@@ -230,7 +307,23 @@ function lineOf(node: AxNode, ref: string | undefined, whitelist: readonly strin
   }
   line += statesOf(node)
   if (ref !== undefined) line += ` ${fresh ? '*' : ''}[ref=${ref}]`
+  // Where the element is, in the pixels a click would use. Only elements that
+  // report a box get one: an element the page puts nowhere has no position,
+  // and printing `0,0` would read as the top-left corner of the page.
+  if (box !== undefined) {
+    line += ` box=${String(box.x)},${String(box.y)} ${String(box.width)}x${String(box.height)}`
+  }
   return line
+}
+
+/** What one node says, for a query to test. */
+function fieldsOf(node: AxNode, whitelist: readonly string[]): string[] {
+  return [
+    roleOf(node),
+    nameOf(node),
+    text(node.value?.value),
+    ...attributesOf(node, whitelist).map(([, value]) => value),
+  ].filter(field => field !== '')
 }
 
 /**
@@ -474,6 +567,77 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
     : [targetNode(nodes, options.target)]
   for (const root of start) measure(root, [])
 
+  /**
+   * The text of the run of consecutive text nodes that starts at one sibling.
+   *
+   * Consecutive runs print as one line, so the words a reader sees are the run's
+   * rather than any one node's; both the printer and a query have to read them
+   * the same way, which is why this is written once.
+   * @param children - the siblings.
+   * @param index - where the run starts.
+   * @returns the merged text, and the index after the last node in the run.
+   */
+  const runAt = (children: readonly AxNode[], index: number): { text: string; end: number } => {
+    let text = nameOf(children[index] ?? {})
+    let next = index + 1
+    while (next < children.length) {
+      const following = children[next]
+      if (following === undefined || roleOf(following) !== 'StaticText' || !printable.has(following)) break
+      text = joinRuns(text, nameOf(following))
+      next += 1
+    }
+    return { text, end: next }
+  }
+
+  /** The line each text run prints as, by node. */
+  const runText = new Map<AxNode, string>()
+  const collectRuns = (node: AxNode): void => {
+    const children = childrenOf(node)
+    for (let index = 0; index < children.length; index += 1) {
+      const child = children[index]
+      if (child === undefined) continue
+      if (roleOf(child) === 'StaticText' && printable.has(child)) {
+        const run = runAt(children, index)
+        for (let member = index; member < run.end; member += 1) {
+          const part = children[member]
+          if (part !== undefined) runText.set(part, run.text)
+        }
+        index = run.end - 1
+        continue
+      }
+      collectRuns(child)
+    }
+  }
+  for (const root of start) collectRuns(root)
+
+  // A query turns the tree into the paths that answer it. Every ancestor of a
+  // match is wanted too: a matching link with no list above it does not say
+  // where in the page it is, which is half of what a reader needs.
+  let wanted: ReadonlySet<AxNode> | undefined
+  let matched = 0
+  if (options.find !== undefined) {
+    const query = options.find
+    const matches = new Set<AxNode>()
+    const ancestors = new Set<AxNode>()
+    const walk = (candidate: AxNode, path: readonly AxNode[]): void => {
+      // Only what a snapshot would print can be a match: a node the filters
+      // drop is noise or a duplicate of an ancestor's words, and that ancestor
+      // is where a reader would see the text anyway.
+      if (printable.has(candidate)) {
+        const run = runText.get(candidate)
+        const fields = run === undefined ? fieldsOf(candidate, whitelist) : [run, ...fieldsOf(candidate, whitelist)]
+        if (query.matches(fields)) {
+          matches.add(candidate)
+          for (const ancestor of path) ancestors.add(ancestor)
+        }
+      }
+      for (const child of childrenOf(candidate)) walk(child, [...path, candidate])
+    }
+    for (const root of start) walk(root, [])
+    wanted = new Set([...matches, ...ancestors])
+    matched = matches.size
+  }
+
   const lines: string[] = []
   const refs = new Map<string, number>()
   const fresh = new Set<string>()
@@ -483,6 +647,9 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
 
   /** Print one line for a node, or count it as elided. */
   const emit = (node: AxNode, depth: number, below: number, force = false): boolean => {
+    // A node no path to a match runs through is not elided, it is not wanted:
+    // counting it would make every narrow query look like a truncated page.
+    if (wanted !== undefined && !wanted.has(node)) return false
     if (!force && !printable.has(node)) return false
     if (depthLimit !== undefined && depth > depthLimit) {
       depthElided += 1 + below
@@ -500,7 +667,8 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
       refs.set(labelled.label, backendNodeId)
       if (labelled.fresh) fresh.add(labelled.label)
     }
-    lines.push(`${'  '.repeat(depth)}${lineOf(node, ref, whitelist, ref !== undefined && fresh.has(ref))}`)
+    const box = backendNodeId === undefined ? undefined : options.boxes?.get(backendNodeId)
+    lines.push(`${'  '.repeat(depth)}${lineOf(node, ref, whitelist, ref !== undefined && fresh.has(ref), box)}`)
     nodesPrinted += 1
     return true
   }
@@ -516,22 +684,16 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
         if (!dropWholeSubtree(child)) printChildren(child, childDepth)
         continue
       }
+      if (wanted !== undefined && !wanted.has(child)) continue
       if (roleOf(child) === 'StaticText') {
         // Text runs that sit next to each other read as one line, so the whole
         // run is gathered before anything is printed or counted.
-        let merged = nameOf(child)
-        let next = index + 1
-        while (next < children.length) {
-          const following = children[next]
-          if (following === undefined || roleOf(following) !== 'StaticText' || !printable.has(following)) break
-          merged = joinRuns(merged, nameOf(following))
-          next += 1
-        }
-        index = next - 1
+        const run = runAt(children, index)
+        index = run.end - 1
         if (depthLimit !== undefined && childDepth > depthLimit) depthElided += 1
         else if (nodesPrinted >= maxNodes) budgetElided += 1
         else {
-          lines.push(`${'  '.repeat(childDepth)}- StaticText ${quoted(merged)}`)
+          lines.push(`${'  '.repeat(childDepth)}- StaticText ${quoted(run.text)}`)
           nodesPrinted += 1
         }
         continue
@@ -551,6 +713,20 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
   }
 
   const notes: string[] = []
+  if (options.find !== undefined) {
+    if (matched === 0) {
+      notes.push(
+        `Nothing in the page matches ${JSON.stringify(options.find.described)}; a query is tested against `
+        + 'the text a snapshot prints, so take one to see what the page says',
+      )
+    } else {
+      notes.push(
+        `… ${String(matched)} node${matched === 1 ? '' : 's'} ${matched === 1 ? 'matches' : 'match'} `
+        + `${JSON.stringify(options.find.described)}; take target="<ref>" for one match's subtree, `
+        + 'or drop find to read the whole page',
+      )
+    }
+  }
   if (budgetElided > 0) {
     notes.push(
       `… ${String(budgetElided)} more nodes were not printed; take a narrower snapshot with `
