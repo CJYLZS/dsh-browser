@@ -904,3 +904,24 @@ test('a snapshot narrowed by a query still names refs the page can be acted on w
   await browser.click(ref)
   assert.equal(page.cdp.method('Input.dispatchMouseEvent').length, 3)
 })
+
+test('the pane is handed the text a copy in the page would take', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Runtime.evaluate', { result: { value: 'alpha beta' } })
+  assert.equal(await browser.selectionText(), 'alpha beta')
+  const expression = String(page.cdp.method('Runtime.evaluate')[0]?.params['expression'])
+  // The focused control's own range comes first: in a text field the document
+  // selection is usually collapsed, and the field's range is what a copy takes.
+  assert.match(expression, /selectionStart/u)
+  assert.match(expression, /getSelection/u)
+})
+
+test('a page with nothing selected reports no text', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Runtime.evaluate', { result: { value: '' } })
+  assert.equal(await browser.selectionText(), '')
+  // A page that answered something that is not a string must not become the word
+  // "undefined" on the user's clipboard.
+  page.cdp.answers.set('Runtime.evaluate', { result: {} })
+  assert.equal(await browser.selectionText(), '')
+})

@@ -108,9 +108,10 @@ function attach(client: WebSocket, pool: BrowserPool, sessionId: string): void {
 
   client.on('message', (raw, isBinary) => {
     if (isBinary) return
-    void handleMessage(String(raw), browser).catch((error: unknown) => {
-      send({ type: 'error', message: error instanceof Error ? error.message : String(error) })
-    })
+    void handleMessage(String(raw), browser, (text) => { send({ type: 'clipboard', text }) })
+      .catch((error: unknown) => {
+        send({ type: 'error', message: error instanceof Error ? error.message : String(error) })
+      })
   })
   const release = (): void => {
     stopStatus()
@@ -124,13 +125,23 @@ function attach(client: WebSocket, pool: BrowserPool, sessionId: string): void {
  * Apply one viewer message.
  * @param raw - the received text frame.
  * @param browser - the session's browser to act on.
+ * @param reply - how the one message that answers (`selection`) sends its answer.
  * @throws {Error} when the message is malformed or names an unknown verb.
  */
-async function handleMessage(raw: string, browser: SessionBrowser): Promise<void> {
+async function handleMessage(
+  raw: string,
+  browser: SessionBrowser,
+  reply: (text: string) => void,
+): Promise<void> {
   const parsed = JSON.parse(raw) as { readonly type?: unknown }
   switch (parsed.type) {
     case 'input':
       await browser.input((parsed as { message: InputMessage }).message)
+      return
+    // The pane's clipboard is the user's browser's; the selection is the
+    // mirrored page's. Only the host can read the second one, so the pane asks.
+    case 'selection':
+      reply(await browser.selectionText())
       return
     case 'navigate':
       await browser.navigate(String((parsed as { url: unknown }).url))

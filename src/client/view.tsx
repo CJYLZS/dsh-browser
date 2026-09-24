@@ -4,16 +4,17 @@
  *
  * Input leaves as fractions of the frame rather than pixels, so the host never
  * needs to know the viewer's size and resizing the Sidebar cannot shift a
- * click. Printable keys go as text, named keys as key events, and a keystroke
- * held with a modifier as the chord it is — Ctrl+A selects the page, it does not
- * type an "a" — mirroring how the host dispatches them.
+ * click. Which message a keystroke becomes — text, a chord, or nothing — is
+ * decided in `keys.ts`, against the same key table the host dispatches from.
  *
  * Styles are inline: this plugin builds its client bundle outside the
  * repository's stylesheet pipeline, so a CSS import would have no owner.
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
 import type { SidebarRightTabInfo, UseSidebarRightTabInfo } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import { clipboardChord, clipboardReply, pasteMessage, type ReadingChord } from './clipboard.ts'
 import { AddressGlobe } from './glyph.ts'
+import { keyMessage } from './keys.ts'
 import { en, type DshBrowserKey } from './locales.ts'
 
 /** Absolute path the host serves the mirror on. */
@@ -21,13 +22,6 @@ const STREAM_PATH = '/dsh-browser/stream'
 
 /** Milliseconds between forwarded pointer moves, so a drag does not flood the socket. */
 const MOVE_INTERVAL_MS = 33
-
-/** Keys dispatched as key events; anything else printable goes as text. */
-const NAMED_KEYS: readonly string[] = [
-  'Enter', 'Tab', 'Backspace', 'Delete', 'Escape',
-  'ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown',
-  'Home', 'End', 'PageUp', 'PageDown',
-]
 
 /** What the viewer knows about the browser it mirrors. */
 interface MirrorStatus {
@@ -99,23 +93,35 @@ function buttonOf(button: number): 'left' | 'middle' | 'right' {
 }
 
 /**
- * The modifiers a key event is holding, spelled the way the host's key messages
- * spell them.
- * @param event - the key event.
- * @returns the modifier names, in the order a chord writes them.
+ * Put text on the system clipboard from the page the user is looking at.
+ *
+ * The async API is the first choice; a browser that refuses it outside its own
+ * idea of a gesture still honours the older hidden-textarea route, which is the
+ * fallback VS Code's web clipboard keeps as well. Focus is restored either way:
+ * the temporary field is a document-wide side effect, and the user's next
+ * keystroke belongs wherever it was going.
+ * @param text - the text to place on the clipboard.
  */
-function modifiersOf(event: {
-  readonly ctrlKey: boolean
-  readonly metaKey: boolean
-  readonly altKey: boolean
-  readonly shiftKey: boolean
-}): string[] {
-  const held: string[] = []
-  if (event.ctrlKey) held.push('Control')
-  if (event.metaKey) held.push('Meta')
-  if (event.altKey) held.push('Alt')
-  if (event.shiftKey) held.push('Shift')
-  return held
+async function writeClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return
+  } catch {
+    // The async API is refused here; the route below is why this function exists.
+  }
+  const previous = document.activeElement
+  const field = document.createElement('textarea')
+  field.setAttribute('aria-hidden', 'true')
+  field.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px'
+  field.value = text
+  document.body.appendChild(field)
+  field.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    field.remove()
+    if (previous instanceof HTMLElement) previous.focus()
+  }
 }
 
 /** Height of the address bar, which its pill radius is derived from. */
@@ -162,6 +168,12 @@ const style: Readonly<Record<string, CSSProperties>> = {
   },
   stage: { position: 'relative', flex: '1 1 auto', minHeight: 0, overflow: 'hidden', background: '#101418' },
   canvas: { display: 'block', width: '100%', height: '100%', objectFit: 'contain', outline: 'none' },
+  // The paste sink stays in the document but out of the way: a browser pastes
+  // into whatever is focused, and for the length of a Ctrl+V this is it.
+  pasteSink: {
+    position: 'absolute', left: '-9999px', top: 0, width: '1px', height: '1px',
+    padding: 0, border: 'none', opacity: 0, resize: 'none',
+  },
   note: {
     position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', gap: '8px',
     alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '12px',
@@ -273,6 +285,15 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | undefined>(undefined)
   const lastMoveRef = useRef(0)
+  const pasteSinkRef = useRef<HTMLTextAreaElement | null>(null)
+  /**
+   * What to do with the selection the mirror is about to report.
+   *
+   * The copy is armed here, on the keystroke, and spent when the answer arrives:
+   * the answer is a round trip away, and the chord is what says whether there is
+   * anything to write at all.
+   */
+  const clipboardRef = useRef<((text: string) => void) | undefined>(undefined)
   const [address, setAddress] = useState('')
   const [status, setStatus] = useState<MirrorStatus | undefined>(undefined)
   const [connected, setConnected] = useState(false)
@@ -308,7 +329,7 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
         void drawFrame(event.data)
         return
       }
-      const parsed = JSON.parse(event.data) as { type?: string; status?: MirrorStatus; message?: unknown }
+      const parsed = JSON.parse(event.data) as { type?: string; status?: MirrorStatus; message?: unknown; text?: unknown }
       if (parsed.type === 'status' && parsed.status !== undefined) {
         setStatus(parsed.status)
         setFailure(undefined)
@@ -317,6 +338,13 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
       // A refused action is otherwise invisible: the status the viewer holds is
       // unchanged, so the failure is what explains why nothing moved.
       if (parsed.type === 'error') setFailure(String(parsed.message))
+      // The mirror's selection, on its way back from the host. It is spent at
+      // once and can only be spent once: it belongs to the chord that asked.
+      if (parsed.type === 'clipboard') {
+        const settle = clipboardRef.current
+        clipboardRef.current = undefined
+        settle?.(String(parsed.text ?? ''))
+      }
     }
     socketRef.current = socket
     return () => {
@@ -348,6 +376,22 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
   const sendInput = useCallback((message: unknown): void => {
     send({ type: 'input', message })
   }, [send])
+
+  /**
+   * Arm the clipboard for the chord just pressed.
+   *
+   * A copy with nothing selected must leave the clipboard alone, and only the
+   * mirror knows what is selected, so the write waits for its answer:
+   * {@link clipboardReply} is the decision, and this is only where it lands.
+   * @param chord - the reading chord that was pressed.
+   */
+  const armClipboard = useCallback((chord: ReadingChord): void => {
+    clipboardRef.current = (text: string): void => {
+      const reply = clipboardReply(chord, text)
+      if (reply.write !== undefined) void writeClipboard(reply.write)
+      if (reply.after !== undefined) sendInput(reply.after)
+    }
+  }, [sendInput])
 
   /**
    * Navigate to what the address bar holds.
@@ -468,24 +512,48 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
             sendInput({ type: 'wheel', x: at.x, y: at.y, deltaX: event.deltaX, deltaY: event.deltaY })
           }}
           onKeyDown={(event) => {
-            // AltGr arrives as Control+Alt on Windows and still produces a
-            // character — a German or Polish layout types its symbols that way
-            // — so sending it as a chord would deliver the keystroke and
-            // swallow the character the user meant to type.
-            const altGraph = event.ctrlKey && event.altKey && event.key.length === 1
-            // A chord is a keystroke, not text. Sending Ctrl+A as the character
-            // "a" is what this used to do: a page that selects everything on
-            // Ctrl+A had an "a" typed into it instead.
-            const chord = (event.ctrlKey || event.metaKey || event.altKey) && !altGraph
-            if (event.key.length === 1 && !chord) {
-              sendInput({ type: 'text', text: event.key })
-              event.preventDefault()
+            // The clipboard shortcuts are the pane's, not the mirror's: the page
+            // cannot receive them at all, and the system clipboard belongs to the
+            // browser the user is in. `clipboard.ts` says why, and which chords.
+            const chord = clipboardChord(event)
+            if (chord === 'paste') {
+              // The browser pastes into whatever is focused when this handler
+              // returns, so hand it the sink; the sink's own `paste` event is
+              // where the text is read. No permission is involved: the user's
+              // keystroke is what lets the browser part with the clipboard.
+              pasteSinkRef.current?.focus()
               return
             }
-            if (chord || NAMED_KEYS.includes(event.key)) {
-              sendInput({ type: 'key', key: [...modifiersOf(event), event.key].join('+') })
+            if (chord !== undefined) {
               event.preventDefault()
+              armClipboard(chord)
+              send({ type: 'selection' })
+              return
             }
+            // Text, a chord, or nothing: the decision, and the reasons it is
+            // shaped that way, are in `keys.ts` with tests of their own.
+            const message = keyMessage(event)
+            if (message === undefined) return
+            sendInput(message)
+            event.preventDefault()
+          }}
+        />
+        {/* The paste sink: the browser's own paste needs something editable to
+            land in, and this is where the pane reads it from. Kept out of the
+            way and out of the tab order — it is a clipboard pipe, not a field. */}
+        <textarea
+          ref={pasteSinkRef}
+          aria-hidden="true"
+          tabIndex={-1}
+          value=""
+          style={style.pasteSink}
+          onChange={() => {}}
+          onPaste={(event) => {
+            const text = event.clipboardData.getData('text')
+            event.preventDefault()
+            canvasRef.current?.focus()
+            const message = pasteMessage(text)
+            if (message !== undefined) sendInput(message)
           }}
         />
         {note === undefined ? null : (

@@ -1687,6 +1687,32 @@ export class SessionBrowser {
     return size
   }
 
+  /**
+   * The text the page has selected, for the pane's own clipboard.
+   *
+   * A copy or a cut is a trusted keystroke in the browser the *user* is in — the
+   * mirrored page never receives one, so the pane cannot let the page do the
+   * copying. The selection, however, lives in the mirrored page, and this is what
+   * asks it for the text.
+   *
+   * The focused control's own selection comes first: in a text field the
+   * document selection is usually collapsed, and the field's range is what a
+   * copy would take there.
+   * @returns the selected text, empty when nothing is selected.
+   */
+  async selectionText(): Promise<string> {
+    await this.ensure()
+    const text = await this.evaluateIn(this.cdpSession(), `(() => {
+      const active = document.activeElement
+      if (active !== null && typeof active.selectionStart === 'number'
+        && active.selectionStart !== active.selectionEnd) {
+        return String(active.value).slice(active.selectionStart, active.selectionEnd)
+      }
+      return window.getSelection()?.toString() ?? ''
+    })()`)
+    return typeof text === 'string' ? text : ''
+  }
+
   /** Stop the browser and release its port and temporary profile. */
   async close(): Promise<void> {
     this.closing = true
