@@ -68,7 +68,7 @@ test('one session keeps one browser', async () => {
 })
 
 test('two sessions get two browsers, two ports, and two profiles', async () => {
-  const { pool, launch } = poolWith({ debugPort: 9400 })
+  const { pool, launch } = poolWith({ debugPortMin: 9400, debugPortMax: 9405 })
   await pool.get('session-a').ensure()
   await pool.get('session-b').ensure()
   assert.equal(launch.browsers.length, 2)
@@ -103,7 +103,7 @@ test('reaching the instance limit fails loudly and leaves the others alone', asy
 })
 
 test('a session that is disposed loses its browser and its port', async () => {
-  const { pool, launch } = poolWith({ debugPort: 9400 })
+  const { pool, launch } = poolWith({ debugPortMin: 9400, debugPortMax: 9405 })
   await pool.get('session-a').ensure()
   await pool.get('session-b').ensure()
   await pool.dispose('session-a')
@@ -111,7 +111,7 @@ test('a session that is disposed loses its browser and its port', async () => {
   assert.equal(launch.browsers[1]?.closed, false)
   assert.equal(pool.peek('session-a'), undefined)
   // The port the closed browser held is free again for the next session.
-  const { pool: next, launch: after } = poolWith({ debugPort: 9400 }, launch)
+  const { pool: next, launch: after } = poolWith({ debugPortMin: 9400, debugPortMax: 9405 }, launch)
   await next.get('session-c').ensure()
   assert.equal(after.browsers[2]?.config.debugPort, 9400)
 })
@@ -147,12 +147,27 @@ test('a browser that dies on its own is reported and replaced on the next reques
 })
 
 test('a launch field change restarts the browser it applies to', async () => {
-  const { pool, launch } = poolWith({ debugPort: 9400 })
+  const { pool, launch } = poolWith({ headless: true })
   await pool.get('session-a').ensure()
-  await pool.reconfigure(plainConfig(Config({ debugPort: 9500 })))
+  await pool.reconfigure(plainConfig(Config({ headless: false })))
   assert.equal(launch.browsers[0]?.closed, true)
   await pool.get('session-a').ensure()
   assert.equal(launch.browsers.length, 2)
+  assert.equal(launch.browsers[1]?.config.headless, false)
+})
+
+test('a port window change leaves the running browser alone and applies to the next one', async () => {
+  const { pool, launch } = poolWith({ debugPortMin: 9400, debugPortMax: 9405 })
+  await pool.get('session-a').ensure()
+  assert.equal(launch.browsers[0]?.config.debugPort, 9400)
+
+  await pool.reconfigure(plainConfig(Config({ debugPortMin: 9500, debugPortMax: 9505 })))
+
+  // A browser listening on an already-allocated port is not disturbed by a
+  // settings tweak about where *future* ports may come from.
+  assert.equal(launch.browsers[0]?.closed, false)
+  assert.equal(pool.get('session-a').status().state, 'ready')
+  await pool.get('session-b').ensure()
   assert.equal(launch.browsers[1]?.config.debugPort, 9500)
 })
 

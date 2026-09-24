@@ -1,20 +1,42 @@
 /**
  * Hand out one external CDP port per browser.
  *
- * The configured port is a starting point rather than an address: the first
- * session's browser takes it, and the next one probes upward, because a second
- * listener on the same port cannot exist. Probing binds the port and releases
- * it, which is the only way to ask the operating system — and because the
- * answer is stale the moment it is given, an allocator also *holds* each port
- * it hands out until its browser is gone.
+ * The configuration names a *window* of ports rather than an address: every
+ * session gets its own browser, every browser needs its own port, and the first
+ * session's browser takes the lowest free port in the window while the next one
+ * takes the next. Probing binds the port and releases it, which is the only way
+ * to ask the operating system — and because the answer is stale the moment it is
+ * given, an allocator also *holds* each port it hands out until its browser is
+ * gone.
  *
  * The window is bounded on purpose. A browser that cannot listen inside it is a
- * failure worth reporting, not a reason to walk the whole range.
+ * failure worth reporting, and the message names the window so a deployment can
+ * widen it — walking past the top would collide with whatever else this machine
+ * runs, which is exactly what the end is there to prevent.
  */
 import { createServer } from 'node:net'
 
-/** How many ports above the base are tried before failing. */
-export const PORT_SCAN_RANGE = 100
+/** The ports session browsers may listen on, both ends included. */
+export interface PortWindow {
+  /** Lowest port in the window. */
+  readonly low: number
+  /** Highest port in the window. */
+  readonly high: number
+}
+
+/**
+ * Read a window from its two configured ends.
+ *
+ * The ends are sorted rather than validated: a deployment that fills the two
+ * boxes the other way round means the same window, and refusing to start a
+ * browser over it would be a worse answer than using it.
+ * @param first - one end of the window.
+ * @param second - the other end.
+ * @returns the window, lowest end first.
+ */
+export function portWindow(first: number, second: number): PortWindow {
+  return first <= second ? { low: first, high: second } : { low: second, high: first }
+}
 
 /** Decides whether one port could be listened on right now. */
 export type PortProbe = (port: number) => Promise<boolean>
@@ -48,16 +70,16 @@ export async function canBind(port: number): Promise<boolean> {
 export class PortAllocator {
   private readonly held: Set<number>
   private pending: Promise<unknown> = Promise.resolve()
-  private base: number
+  private range: PortWindow
   private readonly probe: PortProbe
 
   /**
-   * @param base - the configured first port.
+   * @param range - the window to search.
    * @param taken - ports known to be in use already.
    * @param probe - availability test, replaced in tests.
    */
-  constructor(base: number, taken: Iterable<number> = [], probe: PortProbe = canBind) {
-    this.base = base
+  constructor(range: PortWindow, taken: Iterable<number> = [], probe: PortProbe = canBind) {
+    this.range = range
     this.held = new Set(taken)
     this.probe = probe
   }
@@ -65,7 +87,7 @@ export class PortAllocator {
   /**
    * Take the lowest free port.
    * @returns the port, held for this allocator until {@link release}.
-   * @throws {Error} when no port in the scan range is free.
+   * @throws {Error} when nothing in the window is free.
    */
   async allocate(): Promise<number> {
     const attempt = this.pending.then(async () => await this.search())
@@ -82,14 +104,20 @@ export class PortAllocator {
   }
 
   /**
-   * Change where the next search starts, after the configured port changed.
+   * Move the window, after the configured range changed.
    *
    * Ports already held stay held: the browsers listening on them are still
-   * running, whatever the configuration now says.
-   * @param base - the newly configured first port.
+   * running, whatever the configuration now says, and they come back only when
+   * those browsers close.
+   * @param range - the newly configured window.
    */
-  setBase(base: number): void {
-    this.base = base
+  setWindow(range: PortWindow): void {
+    this.range = range
+  }
+
+  /** The window currently searched. */
+  get window(): PortWindow {
+    return this.range
   }
 
   /** Ports currently held, for diagnostics. */
@@ -97,19 +125,17 @@ export class PortAllocator {
     return [...this.held]
   }
 
-  /** Probe upward until a port answers free. */
+  /** Probe the window from its lowest end upwards. */
   private async search(): Promise<number> {
-    for (let offset = 0; offset < PORT_SCAN_RANGE; offset++) {
-      const port = this.base + offset
-      if (port > 65_535) break
+    for (let port = this.range.low; port <= this.range.high && port <= 65_535; port++) {
       if (this.held.has(port)) continue
       if (!await this.probe(port)) continue
       this.held.add(port)
       return port
     }
     throw new Error(
-      `dsh-browser: no free port for the CDP listener in ${this.base}-${this.base + PORT_SCAN_RANGE - 1}; `
-      + 'another process holds them, or too many session browsers are running',
+      `dsh-browser: no free CDP port in ${this.range.low}-${this.range.high}; `
+      + 'another process holds them, or the window is narrower than the number of session browsers',
     )
   }
 }

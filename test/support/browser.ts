@@ -5,11 +5,21 @@
  * that browser goes away, and none of that needs a real process. These fakes
  * cover exactly the surface the plugin uses: pages, the CDP session attached to
  * one, and the context's own lifecycle events.
+ *
+ * The one thing a fake launch cannot avoid is the profile directory: the plugin
+ * mkdtemps a `dsh-browser-*` directory *before* it calls the launcher, and a
+ * test that never closes its browser is a browser the plugin never cleans up
+ * after. So the launcher records what it was handed and the file's own `after`
+ * hook removes them — otherwise every run leaves an empty directory per launch
+ * in %TEMP%.
  */
 import { EventEmitter } from 'node:events'
+import { rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname } from 'node:path'
+import { after } from 'node:test'
 import type { BrowserContext, CDPSession, Page } from 'playwright-core'
-import type { BrowserConfig } from '../../src/config.ts'
-import type { BrowserSession } from '../../src/browser/launch.ts'
+import type { BrowserSession, LaunchConfig } from '../../src/browser/launch.ts'
 import type { Launcher } from '../../src/browser/session-browser.ts'
 import { fakeCdp, type FakeCdp } from './cdp.ts'
 
@@ -43,7 +53,7 @@ export interface FakeBrowser {
   /** The session handed back to the plugin. */
   readonly session: BrowserSession
   /** Configuration the launch was called with — the assigned CDP port included. */
-  readonly config: BrowserConfig
+  readonly config: LaunchConfig
   /** Profile directory the launch was called with. */
   readonly profileDir: string
   /** Pages that existed when the browser started. */
@@ -72,6 +82,42 @@ export interface FakeLaunch {
   readonly browsers: FakeBrowser[]
 }
 
+/**
+ * Whether a launch's profile directory is one the plugin created for that launch.
+ *
+ * Only what `mkdtemp(join(tmpdir(), 'dsh-browser-'))` produces qualifies. A
+ * configured `userDataDir` resolves to a subdirectory of whatever the deployment
+ * named, and that belongs to the user, not to this suite.
+ * @param directory - the directory a fake launch was handed.
+ * @returns whether the plugin itself created it under the temporary directory.
+ */
+function isTemporaryProfile(directory: string): boolean {
+  return dirname(directory) === tmpdir() && basename(directory).startsWith('dsh-browser-')
+}
+
+/** Temporary profiles this process's fake launches were handed, in launch order. */
+const temporaryProfiles = new Set<string>()
+
+/**
+ * Remove the temporary profiles this run's fake launches created.
+ *
+ * This is a record of what the launches were handed rather than a sweep of the
+ * temporary directory: another dsh instance's *running* browser has a
+ * `dsh-browser-*` profile there too, and deleting that would take out a browser
+ * nobody asked to touch.
+ */
+export function removeTemporaryProfiles(): void {
+  for (const directory of temporaryProfiles) {
+    rmSync(directory, { recursive: true, force: true })
+  }
+  temporaryProfiles.clear()
+}
+
+// Registered here rather than in each test file: every file that launches a
+// browser imports this module, and a test that leaks a profile is exactly the
+// case the plugin cannot clean up on its own.
+after(removeTemporaryProfiles)
+
 /** The user agent a real Chrome sends from a window. */
 export const HEADFUL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36'
 
@@ -96,7 +142,8 @@ export function fakeLauncher(): FakeLaunch {
    * @param profileDir - the profile directory the plugin chose.
    * @returns the session, as a real launch would.
    */
-  const launch: Launcher = async (config, profileDir) => {
+  const launch: Launcher = async (config: LaunchConfig, profileDir) => {
+    if (isTemporaryProfile(profileDir)) temporaryProfiles.add(profileDir)
     const events = new EventEmitter()
     const pages: FakePage[] = []
     let closed = false
@@ -122,6 +169,9 @@ export function fakeLauncher(): FakeLaunch {
           record.emit('framenavigated')
         },
         reload: async () => { record.emit('framenavigated') },
+        // A fake page never has a load in flight, so waiting for one is
+        // immediately satisfied; what it proves is that an action waits at all.
+        waitForLoadState: async () => {},
         close: async () => {
           pageClosed = true
           record.emit('close')

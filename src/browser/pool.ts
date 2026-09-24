@@ -13,7 +13,7 @@
  */
 import type { BrowserConfig } from '../config.ts'
 import { launchBrowser } from './launch.ts'
-import { PortAllocator, type PortProbe } from './ports.ts'
+import { PortAllocator, portWindow, type PortProbe } from './ports.ts'
 import { SessionBrowser, type BrowserStatus, type Launcher, type Logger } from './session-browser.ts'
 
 /** What the plugin, its tools, and its settings page can see about the browsers. */
@@ -44,7 +44,7 @@ export class BrowserPool {
     this.config = config
     this.logger = logger
     this.launch = launch
-    this.allocator = new PortAllocator(config.debugPort, [], probe)
+    this.allocator = new PortAllocator(portWindow(config.debugPortMin, config.debugPortMax), [], probe)
   }
 
   /** How many browsers exist. */
@@ -106,7 +106,10 @@ export class BrowserPool {
    */
   async reconfigure(next: BrowserConfig): Promise<void> {
     this.config = next
-    this.allocator.setBase(next.debugPort)
+    // A moved window only changes where the *next* browser may listen; the
+    // browsers already running keep the ports the allocator is still holding for
+    // them, which is why this is not a launch field.
+    this.allocator.setWindow(portWindow(next.debugPortMin, next.debugPortMax))
     await Promise.all([...this.entries.values()].map(async instance => { await instance.reconfigure(next) }))
   }
 

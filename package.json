@@ -47,7 +47,9 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\"",
     "watch": "tsdown --watch",
-    "prove": "node scripts/prove.mjs"
+    "prove": "node scripts/prove.mjs",
+    "probe": "node scripts/ax-probe.mjs",
+    "regression": "node scripts/snapshot-regression.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4",

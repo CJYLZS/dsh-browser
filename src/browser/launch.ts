@@ -26,6 +26,19 @@ export interface BrowserSession {
 }
 
 /**
+ * A resolved configuration plus the port this launch will listen on.
+ *
+ * The port is not a configuration value: the pool's allocator picks one port per
+ * browser out of the configured window, and passing it separately is what lets a
+ * window change leave running browsers alone. The type lives here rather than in
+ * the configuration because this is the only place a concrete port is known.
+ */
+export interface LaunchConfig extends BrowserConfig {
+  /** The external CDP port this browser is being started on. */
+  readonly debugPort: number
+}
+
+/**
  * Sleep for a fixed time.
  * @param ms - milliseconds.
  * @returns a promise settling after the delay.
@@ -67,13 +80,13 @@ async function waitForDebugPort(port: number, timeoutMs: number): Promise<string
 
 /**
  * Launch the persistent browser and wait for its CDP listener.
- * @param config - resolved plugin configuration.
+ * @param config - resolved plugin configuration, with the port to listen on.
  * @param userDataDir - profile directory to open (temporary or configured).
- * @param timeoutMs - budget for the listener to answer.
+ * @param timeoutMs - budget for the browser to start and for its listener to answer.
  * @returns the running session.
  */
 export async function launchBrowser(
-  config: BrowserConfig,
+  config: LaunchConfig,
   userDataDir: string,
   timeoutMs = 20_000,
 ): Promise<BrowserSession> {
@@ -98,6 +111,12 @@ export async function launchBrowser(
   }
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: config.headless,
+    // Playwright's own budget here is 180 s, which is three minutes of a tool
+    // call that has nothing to show for it — and every call behind it, because
+    // a start in flight is a start they all join. The budget is the same one
+    // the CDP listener below gets: a browser that is not up by then is not
+    // coming up.
+    timeout: timeoutMs,
     // Headless has no window to take a size from, and the virtual one it uses
     // is far smaller than a real page expects — measured at 764x485, which
     // crops most sites. The configured viewport is what the page, the mirrored

@@ -22,7 +22,13 @@ export interface FakeCdp {
   readonly session: CDPSession
   /** Every call made so far, in order. */
   readonly calls: RecordedCall[]
-  /** Responses to return per method; a method absent here answers `{}`. */
+  /**
+   * Responses to return per method; a method absent here answers `{}`.
+   *
+   * A function value is called with the call's params and its result is the
+   * answer, which is how a test makes one method answer differently for
+   * different elements — a node that is gone, a page whose tree changed.
+   */
   readonly answers: Map<string, unknown>
   /** Fail every call to this method with the given message. */
   failWith(method: string, message: string): void
@@ -47,10 +53,13 @@ export function fakeCdp(): FakeCdp {
   const listeners = new Map<string, ((event: unknown) => void)[]>()
   const session = {
     send: async (method: string, params?: unknown): Promise<unknown> => {
-      calls.push({ method, params: (params ?? {}) as Record<string, unknown> })
+      const recorded = (params ?? {}) as Record<string, unknown>
+      calls.push({ method, params: recorded })
       const failure = failures.get(method)
       if (failure !== undefined) throw new Error(failure)
-      return answers.get(method) ?? {}
+      const answer = answers.get(method)
+      if (typeof answer === 'function') return await (answer as (params: Record<string, unknown>) => unknown)(recorded)
+      return answer ?? {}
     },
     on: (method: string, listener: (event: unknown) => void): void => {
       const registered = listeners.get(method) ?? []
