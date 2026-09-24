@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A real local browser per DeepSeek Harness conversation: mirrored into the right Sidebar, driven by the agent with six tools, and attachable over its own CDP port.",
   "license": "MIT",
   "keywords": [

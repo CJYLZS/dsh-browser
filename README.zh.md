@@ -52,13 +52,13 @@ dsh -V
 
 | 你的 dsh | 插件版本 | 安装命令 |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.2.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0` |
+| ≥ 0.1.7-rc.1 | v0.2.1（最新） | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.1` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
-属于当前世代的 dsh，就是这条：
+属于当前世代的 dsh，装最新版就是这条：
 
 ```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0
+dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.1
 ```
 
 构建产物 `lib/` 随每个 tag 提交，所以按 tag 安装不需要构建。profile 的 `package.json` 会记下你选的 ref；换版本就用新 ref 重新 add，移除插件用 `dsh plugin remove --profile web dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。

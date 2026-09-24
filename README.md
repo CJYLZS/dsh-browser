@@ -52,13 +52,13 @@ Then install with the `#<tag>` ref that version pairs with — a build targets o
 
 | Your dsh | Plugin version | Install command |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.2.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0` |
+| ≥ 0.1.7-rc.1 | v0.2.1 (latest) | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.1` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
-For a dsh on the current generation, that is:
+For a dsh on the current generation, the latest release is:
 
 ```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0
+dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.1
 ```
 
 The built `lib/` is committed with each tag, so a tag install needs no build step. The profile's `package.json` records the ref you chose; to change versions, re-add with the new ref, and to remove the plugin use `dsh plugin remove --profile web dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
