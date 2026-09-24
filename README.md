@@ -54,18 +54,13 @@ Then install with the `#<tag>` ref that version pairs with — a build targets o
 | ≥ 0.1.7-rc.1 | v0.2.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
-The built `lib/` is committed with each tag, so a tag install needs no build step. The profile's `package.json` records the ref you chose; to change versions, re-add with the new ref, and to remove the plugin use `dsh plugin remove --profile web dsh-browser`.
-
-For development, link a local checkout instead:
+For a dsh on the current generation, that is:
 
 ```sh
-cd dsh-browser
-pnpm install          # self-contained workspace; store lives in .pnpm-store/
-pnpm run build        # emits lib/index.js (host) and lib/client.js (browser)
-dsh plugin add --profile web link:/absolute/path/to/dsh-browser
+dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0
 ```
 
-A `link:` install points the profile at the checkout directory, so later `pnpm run build` runs apply on the next harness restart without re-adding. Either way, restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
+The built `lib/` is committed with each tag, so a tag install needs no build step. The profile's `package.json` records the ref you chose; to change versions, re-add with the new ref, and to remove the plugin use `dsh plugin remove --profile web dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
 
 -----
 
@@ -178,6 +173,15 @@ Screenshots return a path rather than an inline image. An image content block ca
 ## Dev Note
 
 The plugin directory is a self-contained pnpm workspace (`packages: [- .]`, `storeDir: .pnpm-store`) so pnpm cannot reach the harness repository's workspace. dsh framework packages are `peerDependencies` (`>=0.1.7-rc.1 <0.2.0`, supplied by the host profile) and pinned exactly in `devDependencies` for local types and builds.
+
+To run a local checkout instead of a tag, link it into the profile — later `pnpm run build` runs apply on the next harness restart without re-adding:
+
+```sh
+cd dsh-browser
+pnpm install          # self-contained workspace; store lives in .pnpm-store/
+pnpm run build        # emits lib/index.js (host) and lib/client.js (browser)
+dsh plugin add --profile web link:/absolute/path/to/dsh-browser
+```
 
 Commands: `pnpm run build` (tsdown, both halves), `pnpm run typecheck`, `pnpm test`, and the measurement rigs in `scripts/` (`prove.mjs` for the CDP port, screen cast, input dispatch, and screenshot; `modes.mjs` for headless/windowed/minimized; `cdp.mjs` to read or drive a running browser over its external port, with `--port=` to pick a session's).
 

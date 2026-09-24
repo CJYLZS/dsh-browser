@@ -54,18 +54,13 @@ dsh -V
 | ≥ 0.1.7-rc.1 | v0.2.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
-构建产物 `lib/` 随每个 tag 提交，所以按 tag 安装不需要构建。profile 的 `package.json` 会记下你选的 ref；换版本就用新 ref 重新 add，移除插件用 `dsh plugin remove --profile web dsh-browser`。
-
-开发时改为链接本地检出：
+属于当前世代的 dsh，就是这条：
 
 ```sh
-cd dsh-browser
-pnpm install          # 自包含 workspace；store 在 .pnpm-store/
-pnpm run build        # 产出 lib/index.js（host）与 lib/client.js（浏览器端）
-dsh plugin add --profile web link:/absolute/path/to/dsh-browser
+dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.0
 ```
 
-`link:` 安装把 profile 指向检出目录，之后 `pnpm run build` 的产物在下次重启 harness 时生效，不必重新 add。两种方式装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
+构建产物 `lib/` 随每个 tag 提交，所以按 tag 安装不需要构建。profile 的 `package.json` 会记下你选的 ref；换版本就用新 ref 重新 add，移除插件用 `dsh plugin remove --profile web dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
 
 -----
 
@@ -178,6 +173,15 @@ dsh 在 0.1.7-rc.1 改掉了设置模型，且没有兼容层。插件页面现�
 ## 开发
 
 插件目录是自包含的 pnpm workspace（`packages: [- .]`、`storeDir: .pnpm-store`），因此 pnpm 够不到 harness 仓库的 workspace。dsh 框架包声明为 `peerDependencies`（`>=0.1.7-rc.1 <0.2.0`，由 host profile 提供），并在 `devDependencies` 里精确钉住，供本地类型与构建使用。
+
+想跑本地检出而不是 tag，就把它链接进 profile——之后 `pnpm run build` 的产物在下次重启 harness 时生效，不必重新 add：
+
+```sh
+cd dsh-browser
+pnpm install          # 自包含 workspace；store 在 .pnpm-store/
+pnpm run build        # 产出 lib/index.js（host）与 lib/client.js（浏览器端）
+dsh plugin add --profile web link:/absolute/path/to/dsh-browser
+```
 
 命令：`pnpm run build`（tsdown，两半都产出）、`pnpm run typecheck`、`pnpm test`，以及 `scripts/` 下的实测脚本（`prove.mjs` 验证 CDP 端口、screencast、输入派发与截图；`modes.mjs` 对照无头/带窗口/最小化；`cdp.mjs` 通过对外端口读写一台运行中的浏览器，用 `--port=` 指定某个会话的）。
 
