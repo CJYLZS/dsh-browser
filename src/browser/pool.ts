@@ -99,6 +99,20 @@ export class BrowserPool {
   }
 
   /**
+   * Everything running, with each browser's tab list read fresh.
+   *
+   * The tab list is what the sidebar's own tabs are built from, so it carries
+   * the titles the pages carry now rather than the ones adoption remembered.
+   * @returns the report, awaiting every browser's answer.
+   */
+  async statusAsync(): Promise<PoolStatus> {
+    return {
+      maxInstances: this.config.maxInstances,
+      instances: await Promise.all([...this.entries.values()].map(instance => instance.statusAsync())),
+    }
+  }
+
+  /**
    * Adopt a new configuration, for the browsers that already exist and for
    * every one created afterwards.
    * @param next - the newly resolved configuration.

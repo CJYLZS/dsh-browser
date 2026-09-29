@@ -452,6 +452,13 @@ test('a program can branch on what the page changed', async () => {
     const expression = String(params['expression'])
     if (expression.includes('MutationObserver')) return { result: { value: 0 } }
     if (expression.includes('__dshSettle')) return { result: { value: observation } }
+    // The state read asks the document (see `stateOf`); the answer describes the
+    // same document the observation was made on.
+    if (expression.includes('performance.timeOrigin')) {
+      return {
+        result: { value: { url: h.page.url, title: `title of ${h.page.url}`, origin: 1_700_000_000_000 } },
+      }
+    }
     return { result: { value: 'evaluated' } }
   })
   const result = await h.run([
@@ -468,6 +475,20 @@ test('a program can branch on what the page changed', async () => {
     preview: 'Saved',
     omitted: 2,
   })
+})
+
+test('a program can wait for an element it can act on, and branch on why it did not', async () => {
+  const h = await ptcHarness()
+  // The element is on the page the whole time and the page says it cannot be
+  // pressed, so the branch a program sees is the one a model needs — "there,
+  // but not usable" — rather than "never appeared".
+  h.page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { dis: true } } })
+  const result = await h.run([
+    'const report = await tools.browser_wait({ role: "button", name: "Send", enabled: true, timeoutMs: 200 })',
+    'return { matched: report.matched, matches: report.matches, disabled: report.disabled }',
+  ].join('\n'))
+  assert.equal(result.failed, false, `the program failed: ${result.message}`)
+  assert.deepEqual(result.value, { matched: false, matches: 1, disabled: 1 })
 })
 
 test('one program can drive every tool, and each answers with a value', async () => {

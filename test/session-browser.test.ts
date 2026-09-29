@@ -24,6 +24,31 @@ const AX_TREE = {
   ],
 }
 
+/**
+ * The same page, with an iframe element in it.
+ *
+ * Chrome answers the page-level tree with the iframe carrying no children
+ * (measured 2026-09-29 on a same-origin pair), so this is the shape the splice
+ * starts from.
+ */
+const AX_TREE_WITH_FRAME = {
+  nodes: [
+    { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Form' }, childIds: ['2', '3', '4'] },
+    { nodeId: '2', role: { value: 'textbox' }, name: { value: 'Email' }, backendDOMNodeId: 21 },
+    { nodeId: '3', role: { value: 'button' }, name: { value: 'Send' }, backendDOMNodeId: 31 },
+    { nodeId: '4', role: { value: 'Iframe' }, name: { value: 'iframe 1' }, childIds: [], backendDOMNodeId: 41 },
+  ],
+}
+
+/** The frame's own tree, as `getFullAXTree({ frameId })` answers it. */
+const FRAME_TREE = {
+  nodes: [
+    { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'I am iFrame 1' }, childIds: ['2', '3'] },
+    { nodeId: '2', role: { value: 'StaticText' }, name: { value: 'I am iFrame 1' } },
+    { nodeId: '3', role: { value: 'button' }, name: { value: 'CLick Me' }, backendDOMNodeId: 51 },
+  ],
+}
+
 /** A quads answer describing a 20x20 box whose centre is (20, 30). */
 const QUADS = { quads: [[10, 20, 30, 20, 30, 40, 10, 40]] }
 
@@ -34,6 +59,23 @@ const QUADS = { quads: [[10, 20, 30, 20, 30, 40, 10, 40]] }
  * what a press at that point reaches (`mine`).
  */
 const PRESS = { ok: true, x: 20, y: 30, moved: false, inView: true, mine: true, over: null }
+
+/**
+ * The document instant the observed pages answer with.
+ *
+ * One number for every page a test observes, because an observation does not
+ * replace the document: before and after read the same document, which is what
+ * makes "the page did not change" the right answer in those tests.
+ */
+const OBSERVED_ORIGIN = 1_700_000_000_000
+
+/**
+ * The document instant of a document that replaced the one the action began on.
+ *
+ * One more than `OBSERVED_ORIGIN`: the only fact a replaced document carries
+ * when the address and the title it replaced are identical.
+ */
+const REPLACED_ORIGIN = 1_700_000_000_001
 
 /**
  * Layout metrics for a scrolled page.
@@ -309,6 +351,177 @@ test('a new tab becomes the page the tools act on', async () => {
   assert.deepEqual(browser.status().tabs.map(tab => tab.active), [false, true])
 })
 
+test('status names every page by its CDP target id and title', async () => {
+  // The sidebar's tab list is 1:1 with the browser's pages, and a tab has to
+  // keep naming its page across navigations and active-page changes — so the
+  // identity is the CDP target id (what external DevTools sees too), not the
+  // address or the position, and the title rides along with it.
+  const { browser, launch } = await started()
+  const opened = launch.browsers[0]?.openPage('https://example.test/new')
+  assert.ok(opened !== undefined)
+  await new Promise(resolve => { setImmediate(resolve) })
+  const tabs = browser.status().tabs
+  assert.deepEqual(tabs.map(tab => tab.targetId), ['target-0', 'target-1'])
+  assert.deepEqual(
+    tabs.map(tab => tab.title),
+    ['title of about:blank', 'title of https://example.test/new'],
+  )
+  assert.deepEqual(tabs.map(tab => tab.active), [false, true])
+})
+
+test('a status read answers the titles the pages carry now', async () => {
+  // The title a page reported when it was adopted is already out of date the
+  // moment the page renames itself, and the sidebar's tab chips read what the
+  // status route answers. `Target.getTargets` is one browser-level call — it
+  // never touches a renderer, so a busy page cannot hold the answer — and it
+  // is what makes the read fresh rather than a memory of adoption time.
+  const { browser, launch } = await started()
+  const opened = launch.browsers[0]?.openPage('https://example.test/new')
+  assert.ok(opened !== undefined)
+  await new Promise(resolve => { setImmediate(resolve) })
+  launch.browsers[0]?.browserCdp.answers.set('Target.getTargets', () => ({
+    targetInfos: [
+      { targetId: 'target-0', type: 'page', url: 'about:blank', title: 'Renamed blank' },
+      { targetId: 'target-1', type: 'page', url: 'https://example.test/new', title: 'Fresh title' },
+    ],
+  }))
+  const status = await browser.statusAsync()
+  assert.deepEqual(status.tabs.map(tab => tab.title), ['Renamed blank', 'Fresh title'])
+  assert.deepEqual(status.tabs.map(tab => tab.targetId), ['target-0', 'target-1'])
+})
+
+test('a status read falls back to what adoption learned when the target list refuses', async () => {
+  const { browser, launch } = await started()
+  launch.browsers[0]?.openPage('https://example.test/new')
+  await new Promise(resolve => { setImmediate(resolve) })
+  launch.browsers[0]?.browserCdp.failWith('Target.getTargets', 'not attached')
+  const status = await browser.statusAsync()
+  assert.deepEqual(
+    status.tabs.map(tab => tab.title),
+    ['title of about:blank', 'title of https://example.test/new'],
+  )
+  assert.deepEqual(status.tabs.map(tab => tab.targetId), ['target-0', 'target-1'])
+})
+
+test('a browser without a browser-level session still reports its pages', async () => {
+  // A context created outside a browser answers `browser()` with null; the tab
+  // list is then what adoption cached, which is still a list.
+  const { browser, launch } = await started()
+  launch.browsers[0]?.openPage('https://example.test/new')
+  await new Promise(resolve => { setImmediate(resolve) })
+  const context = launch.browsers[0]?.session.context as unknown as { browser?: () => null }
+  context.browser = () => null
+  const status = await browser.statusAsync()
+  assert.equal(status.tabs.length, 2)
+  assert.deepEqual(status.tabs.map(tab => tab.title), ['title of about:blank', 'title of https://example.test/new'])
+})
+
+test('closing a page by its target id closes that page and keeps the browser', async () => {
+  const { browser, launch } = await started()
+  const opened = launch.browsers[0]?.openPage('https://example.test/new')
+  assert.ok(opened !== undefined)
+  await new Promise(resolve => { setImmediate(resolve) })
+  await browser.closePage('target-0')
+  await new Promise(resolve => { setImmediate(resolve) })
+  assert.equal(launch.browsers[0]?.pages[0]?.closed, true, 'the page the tab named is the page that closed')
+  assert.equal(opened.closed, false, 'the other page is untouched')
+  assert.equal(browser.status().state, 'ready', 'the browser outlives one of its pages')
+  assert.equal(browser.status().url, 'https://example.test/new', 'the tools moved to the page that is left')
+})
+
+test('closing the last page stops the browser the user closed', async () => {
+  // Chrome exits when its last tab goes, so the close of the only page is the
+  // deliberate stop: a viewer coming back must not start a new one over it,
+  // exactly as for the pane's own close before tabs named their pages.
+  const { browser, launch } = await started()
+  await browser.closePage('target-0')
+  assert.equal(browser.status().state, 'closed')
+  assert.equal(launch.browsers[0]?.closed, true)
+  browser.addViewer(() => {})
+  await quiet()
+  assert.equal(launch.browsers.length, 1, 'a viewer restarted a browser the user closed')
+  await browser.evaluate('1 + 1')
+  assert.equal(launch.browsers.length, 2, 'a tool call is a request for a browser, and brings one back')
+})
+
+test('closing a target the browser does not hold changes nothing', async () => {
+  // A sidebar tab can name a page that is already gone — the page closed
+  // itself while the tab was still up. That is not a reason to stop the
+  // browser that outlived it.
+  const { browser, launch } = await started()
+  await browser.closePage('target-9')
+  assert.equal(browser.status().state, 'ready')
+  assert.equal(launch.browsers[0]?.closed, false)
+})
+
+test('a viewer names its page and is sent that page alone', async () => {
+  const { browser, launch } = await started()
+  const opened = launch.browsers[0]?.openPage('https://example.test/new')
+  assert.ok(opened !== undefined)
+  await new Promise(resolve => { setImmediate(resolve) })
+  const frames: unknown[] = []
+  const stop = await browser.addPageViewer(frame => frames.push(frame), 'target-1')
+  await until(() => (opened.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the named page screen cast')
+  assert.equal(
+    launch.browsers[0]?.pages[0]?.cdp.method('Page.startScreencast').length ?? 0,
+    0,
+    'the page nobody named is not being mirrored',
+  )
+  opened.cdp.emit('Page.screencastFrame', FRAME)
+  assert.equal(frames.length, 1)
+  stop()
+  await until(() => (opened.cdp.method('Page.stopScreencast').length ?? 0) > 0, 'the named page stream stopping')
+})
+
+test('two viewers of one page share one screen cast', async () => {
+  const { browser, launch } = await started()
+  const opened = launch.browsers[0]?.openPage('https://example.test/new')
+  assert.ok(opened !== undefined)
+  await new Promise(resolve => { setImmediate(resolve) })
+  const first: unknown[] = []
+  const second: unknown[] = []
+  const stopFirst = await browser.addPageViewer(frame => first.push(frame), 'target-1')
+  const stopSecond = await browser.addPageViewer(frame => second.push(frame), 'target-1')
+  await until(() => (opened.cdp.method('Page.startScreencast').length ?? 0) > 0, 'the shared screen cast')
+  assert.equal(opened.cdp.method('Page.startScreencast').length, 1, 'one page, one stream')
+  opened.cdp.emit('Page.screencastFrame', FRAME)
+  assert.equal(first.length, 1)
+  assert.equal(second.length, 1)
+  stopFirst()
+  stopSecond()
+  await until(() => (opened.cdp.method('Page.stopScreencast').length ?? 0) > 0, 'the stream stopping after the last viewer')
+})
+
+test('a viewer naming a page the browser does not hold is refused', async () => {
+  const { browser } = await started()
+  await assert.rejects(
+    () => browser.addPageViewer(() => {}, 'target-9'),
+    /has no page target-9/,
+  )
+})
+
+test('input and navigation go to the page the viewer names', async () => {
+  const { browser, launch } = await started()
+  const opened = launch.browsers[0]?.openPage('https://example.test/new')
+  assert.ok(opened !== undefined)
+  await new Promise(resolve => { setImmediate(resolve) })
+  // A later tab takes the active seat, which is what makes the first one a
+  // page a pane can mirror without the tools acting on it.
+  const newest = launch.browsers[0]?.openPage('https://example.test/third')
+  assert.ok(newest !== undefined)
+  await new Promise(resolve => { setImmediate(resolve) })
+  await browser.input({ type: 'mouse', action: 'down', x: 0.5, y: 0.5 }, 'target-1')
+  await browser.navigatePage('target-1', 'https://example.test/next')
+  assert.ok(opened.cdp.method('Input.dispatchMouseEvent').length > 0, 'the named page got the press')
+  assert.equal(
+    newest.cdp.method('Input.dispatchMouseEvent').length,
+    0,
+    'the page nobody named got nothing',
+  )
+  assert.equal(opened.url, 'https://example.test/next')
+  assert.equal(browser.status().url, 'https://example.test/third', 'the active page is the tools’ business, not the pane’s')
+})
+
 test('closing the active tab moves to the one that is left', async () => {
   const { browser, launch } = await started()
   const first = launch.browsers[0]?.pages[0]
@@ -480,6 +693,14 @@ function observe(
       return { result: { value: 0 } }
     }
     if (expression.includes('__dshSettle')) return { result: { value: seen } }
+    // The state reads go through the document probe (see `stateOf`); answering
+    // it keeps a page that is only being observed from reading as one that
+    // cannot answer at all.
+    if (expression.includes('performance.timeOrigin')) {
+      return {
+        result: { value: { url: page.url, title: `title of ${page.url}`, origin: OBSERVED_ORIGIN } },
+      }
+    }
     return { result: { value: 'evaluated' } }
   })
 }
@@ -621,6 +842,34 @@ test('a click reports what the page changed, not just that it changed', async ()
   assert.deepEqual([...report.changed], ['dom'], 'the change list still says the page moved')
 })
 
+test('a boolean attribute keeps the empty value that says it was there', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // Measured 2026-09-29: `disabled` is an attribute whose value IS the empty
+  // string, so Chrome reports `oldValue: ""` when it is removed and
+  // `getAttribute` answers `""` right after it is added. Reading "" as "the
+  // page said nothing" printed an addition and a removal as the same line.
+  observe(page, 2, {
+    changes: [
+      { kind: 'attribute', tag: 'button', attribute: 'disabled', from: '' },
+      { kind: 'attribute', tag: 'button', attribute: 'hidden', to: '' },
+    ],
+  })
+  const report = await browser.click('e2')
+  assert.deepEqual(report.changes, [
+    { kind: 'attribute', tag: 'button', attribute: 'disabled', from: '' },
+    { kind: 'attribute', tag: 'button', attribute: 'hidden', to: '' },
+  ])
+})
+
+test('a field that is empty and means nothing is still dropped', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  observe(page, 1, { changes: [{ kind: 'added', tag: 'div', preview: '', role: '' }] })
+  const report = await browser.click('e2')
+  assert.deepEqual(report.changes, [{ kind: 'added', tag: 'div' }], 'an empty preview is not a description')
+})
+
 test('a result says how many changes it did not itemise', async () => {
   const { browser, page } = await started()
   await browser.snapshot()
@@ -708,6 +957,48 @@ test('a wait that never matches reports the wait instead of failing', async () =
   assert.equal(typeof report.title, 'string')
 })
 
+test('a wait can ask for an element it can actually act on', async () => {
+  // The button is on the page the whole time; what changes is whether it can
+  // take a press. A wait that counted "on the page" would have returned at once
+  // with an element the click is about to refuse — measured 2026-09-29 on a real
+  // page whose own copy says "Button becomes enabled 3 seconds after arming".
+  const { browser, page } = await started()
+  let asked = 0
+  page.cdp.answers.set('Runtime.callFunctionOn', () => {
+    asked += 1
+    return { result: { value: { dis: asked < 3 } } }
+  })
+  const report = await browser.wait(
+    { locator: { role: 'button', name: 'Send' }, enabled: true },
+    { timeoutMs: 1_000, pollMs: 1 },
+  )
+  assert.equal(report.matched, true)
+  assert.deepEqual(report.element, { role: 'button', name: 'Send' })
+  assert.ok(asked >= 3, `the page was asked whether it can be pressed ${String(asked)} time(s)`)
+  assert.equal(report.disabled, undefined, 'a wait that held says nothing about disabled elements')
+})
+
+test('a wait for a usable element says when it is there but disabled', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { dis: true } } })
+  const report = await browser.wait(
+    { locator: { role: 'button', name: 'Send' }, enabled: true },
+    { timeoutMs: 20, pollMs: 1 },
+  )
+  assert.equal(report.matched, false)
+  assert.equal(report.matches, 1, 'the element was on the page the whole time')
+  assert.equal(report.disabled, 1, 'and the page said it could not be pressed')
+})
+
+test('a wait that did not ask for a usable element asks the page nothing extra', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { dis: true } } })
+  const report = await browser.wait({ locator: { role: 'button', name: 'Send' } }, { timeoutMs: 20, pollMs: 1 })
+  assert.equal(report.matched, true)
+  assert.equal(report.disabled, undefined)
+  assert.deepEqual(page.cdp.method('Runtime.callFunctionOn'), [], 'a plain wait has no business asking')
+})
+
 test('a wait on an address reads the address the page shows', async () => {
   const { browser, page } = await started()
   page.url = 'https://example.test/engine/READY'
@@ -755,13 +1046,13 @@ test('a wait carries what the page changed while it waited', async () => {
 
 test('a selector the page refuses fails the wait instead of polling a typo', async () => {
   const { browser, page } = await started()
-  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 7 } })
-  page.cdp.failWith('DOM.querySelectorAll', 'SyntaxError: not a valid selector')
+  answerSelectors(page, {}, new Set(['$$$']))
   await assert.rejects(
     () => browser.wait({ locator: { selector: '$$$' } }, { timeoutMs: 20, pollMs: 1 }),
     /refused the selector/,
   )
-  assert.equal(page.cdp.method('DOM.querySelectorAll').length, 1, 'the page was asked the same typo again')
+  assert.equal(page.cdp.method('Runtime.evaluate').filter(call => String(call.params['expression']).includes('const selector')).length, 1,
+    'the page was asked the same typo again')
 })
 
 test('a wait that matches several elements says how many', async () => {
@@ -859,6 +1150,33 @@ test('a click on a point outside the viewport is refused, forced or not', async 
   assert.deepEqual(pointerCalls(page), [])
 })
 
+test('a click the page says the element is disabled is refused, force or not', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // Measured 2026-09-29: a real disabled button answered `Clicked button
+  // "Submit"` and the page ignored the press, while the sibling refusal for
+  // typing has named "it is disabled" since the round before. `force` is about
+  // what receives the press, so it does not turn this verdict off.
+  page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { ...PRESS, dis: true } } })
+  await assert.rejects(
+    () => browser.click('e2'),
+    /button "Send" is disabled.*nothing was clicked.*force does not bypass this/,
+  )
+  await assert.rejects(() => browser.click('e2', { force: true }), /is disabled/)
+  assert.deepEqual(pointerCalls(page), [], 'a refused click was dispatched anyway')
+})
+
+test('a click is not turned into a refusal when the page said nothing about it', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // The field is absent rather than false in every answer that predates it, and
+  // an answer this plugin cannot read is not evidence that the element is dead.
+  page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { ...PRESS, dis: 'yes' } } })
+  const report = await browser.click('e2')
+  assert.equal(report.element?.name, 'Send')
+  assert.equal(pointerCalls(page).length, 3)
+})
+
 test('a click reads a moving element again instead of pressing where it was', async () => {
   const { browser, page } = await started()
   await browser.snapshot()
@@ -906,6 +1224,107 @@ test('navigate reports the address and title it landed on', async () => {
   assert.equal(report.url, 'https://example.test/next')
   assert.equal(report.title, 'title of https://example.test/next')
   assert.ok(report.changed.includes('url'))
+})
+
+test('a click that replaced the document says so even when nothing else changed', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // A form POST that answers with the same page replaces the document and
+  // changes neither the address nor the title — measured 2026-09-29 on a real
+  // login form, where the report claimed a title change that never happened
+  // and said nothing about the replacement.
+  let reads = 0
+  page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
+    const expression = String(params['expression'])
+    if (expression.includes('MutationObserver')) return { result: { value: 0 } }
+    if (expression.includes('__dshSettle')) {
+      return { result: { value: { mutations: 0, settled: true, changes: [], omitted: 0 } } }
+    }
+    if (expression.includes('performance.timeOrigin')) {
+      reads += 1
+      return {
+        result: {
+          value: {
+            url: page.url,
+            title: `title of ${page.url}`,
+            origin: reads === 1 ? OBSERVED_ORIGIN : REPLACED_ORIGIN,
+          },
+        },
+      }
+    }
+    return { result: { value: 'evaluated' } }
+  })
+  const report = await browser.click('e2')
+  assert.deepEqual([...report.changed], ['document'], 'the only change was the document itself')
+})
+
+test('a state read waits for the document instead of printing a placeholder', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // What the protocol's convenience answers while a document replaces itself:
+  // `Loading <url>` — its own placeholder for "the evaluation could not run"
+  // (measured 2026-09-29). The report carries the title the page gives, or
+  // none; never one it invented.
+  let reads = 0
+  page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
+    const expression = String(params['expression'])
+    if (expression.includes('MutationObserver')) return { result: { value: 0 } }
+    if (expression.includes('__dshSettle')) {
+      return { result: { value: { mutations: 0, settled: true, changes: [], omitted: 0 } } }
+    }
+    if (expression.includes('performance.timeOrigin')) {
+      reads += 1
+      if (reads === 1) {
+        throw new Error('Execution context was destroyed, most likely because of a navigation')
+      }
+      return {
+        result: { value: { url: page.url, title: 'The Internet', origin: OBSERVED_ORIGIN } },
+      }
+    }
+    return { result: { value: 'evaluated' } }
+  })
+  const report = await browser.click('e2')
+  assert.equal(report.title, 'The Internet')
+  assert.equal(report.url, page.url)
+})
+
+test('a click that opens a tab reports the tab, not the page it left behind', async () => {
+  const { browser, launch, page } = await started()
+  await browser.snapshot()
+  const first = launch.browsers[0]
+  assert.ok(first !== undefined)
+  // The tab opens while the action is settling, the way a real `window.open`
+  // lands a beat after the press returns (measured 2026-09-29: two of three
+  // such clicks described the page they left behind).
+  page.cdp.answers.set('Runtime.callFunctionOn', () => {
+    void first.openPage('https://example.test/opened')
+    return { result: { value: PRESS } }
+  })
+  const report = await browser.click('e2')
+  assert.equal(report.url, 'https://example.test/opened')
+  assert.deepEqual([...report.changed], ['url', 'title', 'document'])
+})
+
+test('a frame\u2019s content is in the snapshot and acts like any other element', async () => {
+  const { browser, page } = await started()
+  // Chrome answers the page-level tree with the iframe element carrying no
+  // children (measured 2026-09-29 on a same-origin pair); the frame's own tree
+  // is a separate answer, and the splice is what puts its control in front of
+  // the caller.
+  page.cdp.answers.set('Page.getFrameTree', {
+    frameTree: { frame: { frameId: 'root' }, childFrames: [{ frame: { frameId: 'f1' } }] },
+  })
+  page.cdp.answers.set('Accessibility.getFullAXTree', (params: Record<string, unknown>) => (
+    params['frameId'] === 'f1' ? FRAME_TREE : AX_TREE_WITH_FRAME
+  ))
+  page.cdp.answers.set('DOM.getFrameOwner', { backendNodeId: 41 })
+  const snapshot = await browser.snapshot()
+  const ref = /button "CLick Me" \[ref=(e\d+)\]/.exec(snapshot.text)?.[1]
+  assert.ok(ref !== undefined, `the frame\u2019s control had no ref: ${snapshot.text}`)
+  // Acting on the ref goes through the same protocol path any element's does.
+  const report = await browser.click(ref)
+  assert.deepEqual(report.element, { role: 'button', name: 'CLick Me' })
+  assert.equal(page.cdp.method('Input.dispatchMouseEvent').length, 3)
 })
 
 test('an evaluation that awaits at the top level is retried in REPL mode', async () => {
@@ -1209,21 +1628,44 @@ const AMBIGUOUS_TREE = {
 }
 
 /**
- * Answer the DOM calls a CSS selector resolution makes.
+ * Answer the protocol a CSS selector resolution makes.
  *
- * A node id doubles as the backend node id here, which is what maps a match
+ * The page walks the selector itself (see `selectorProbe`), so the fake answers
+ * the way a real page would: the walk leaves its matches in the page's slot and
+ * answers with the count, each match is handed back as a handle one at a time,
+ * and a node id doubles as the backend node id here, which is what maps a match
  * back to the accessibility tree the tree-shaped assertions use.
  * @param page - the fake page to answer on.
  * @param matches - selector to the node ids it matches; an absent selector matches nothing.
+ * @param refused - selectors the page cannot parse, which throw the way a real
+ * page throws at `querySelector`.
  */
-function answerSelectors(page: FakePage, matches: Record<string, number[]>): void {
-  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 1 } })
-  page.cdp.answers.set('DOM.querySelectorAll', (params: Record<string, unknown>) => ({
-    nodeIds: matches[String(params['selector'])] ?? [],
-  }))
-  page.cdp.answers.set('DOM.describeNode', (params: Record<string, unknown>) => ({
-    node: { backendNodeId: params['nodeId'] },
-  }))
+function answerSelectors(page: FakePage, matches: Record<string, number[]>, refused: ReadonlySet<string> = new Set()): void {
+  let current: number[] = []
+  page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
+    const expression = String(params['expression'] ?? '')
+    if (expression.includes('performance.timeOrigin')) {
+      return {
+        result: { value: { url: page.url, title: `title of ${page.url}`, origin: OBSERVED_ORIGIN } },
+      }
+    }
+    const embedded = /const selector = ("(?:[^"\\]|\\.)*")/.exec(expression)
+    if (embedded !== null) {
+      const selector = JSON.parse(embedded[1]) as string
+      if (refused.has(selector)) {
+        throw new Error(`SyntaxError: Failed to execute 'querySelector': '${selector}' is not a valid selector`)
+      }
+      current = matches[selector] ?? []
+      return { result: { value: current.length } }
+    }
+    const handle = /^globalThis\.__dshMatches\[(\d+)\]$/.exec(expression)
+    if (handle !== null) return { result: { objectId: `handle-${handle[1]}` } }
+    return { result: { value: 'evaluated' } }
+  })
+  page.cdp.answers.set('DOM.describeNode', (params: Record<string, unknown>) => {
+    const index = Number(/^handle-(\d+)$/.exec(String(params['objectId'] ?? ''))?.[1] ?? -1)
+    return { node: { backendNodeId: current[index], nodeName: 'DIV' } }
+  })
 }
 
 test('a role-and-name locator clicks the element the matching ref named', async () => {
@@ -1309,18 +1751,16 @@ test('a selector whose matches the tree does not describe says that, rather than
 
 test('a selector reaches an element the accessibility tree does not describe', async () => {
   const { browser, page } = await started()
+  // The helper names every undescribed match by its tag, which is the element
+  // the tree has no node for — the tag is the only name there is.
   answerSelectors(page, { '#bare': [99] })
-  // After the helper, which sets a generic `DOM.describeNode`: this is the
-  // element the tree has no node for, so the tag is the only name there is.
-  page.cdp.answers.set('DOM.describeNode', () => ({ node: { backendNodeId: 99, nodeName: 'DIV' } }))
   const report = await browser.click({ selector: '#bare' })
   assert.equal(report.element?.role, 'div')
 })
 
 test('a selector the page rejects is reported as a bad selector, not as an empty page', async () => {
   const { browser, page } = await started()
-  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 1 } })
-  page.cdp.failWith('DOM.querySelectorAll', 'DOM Error while querying: "#1bad" is not a valid selector')
+  answerSelectors(page, {}, new Set(['#1bad']))
   // "no element matches" would send the caller looking for another element when
   // what is wrong is the question.
   await assert.rejects(() => browser.click({ selector: '#1bad' }), /refused the selector|not a valid selector/)

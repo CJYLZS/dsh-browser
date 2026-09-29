@@ -136,6 +136,19 @@ test('a change with nothing to say is just its direction and its element', () =>
   )
 })
 
+test('an empty attribute value reads as a value, so the two directions differ', () => {
+  // `disabled=""` is how a boolean attribute looks, and the empty string is
+  // what the page reports for it (`from` on removal, `to` on addition).
+  assert.equal(
+    changesText([{ kind: 'attribute', tag: 'button', preview: 'Save', attribute: 'disabled', from: '' }], 0),
+    'dom: ~ button "Save" disabled: "" → (none)',
+  )
+  assert.equal(
+    changesText([{ kind: 'attribute', tag: 'button', preview: 'Save', attribute: 'disabled', to: '' }], 0),
+    'dom: ~ button "Save" disabled: (none) → ""',
+  )
+})
+
 test('changes a result could not fit are counted where they were left out', () => {
   assert.equal(
     changesText([{ kind: 'added', tag: 'li' }], 1),
@@ -187,6 +200,28 @@ test('a wait that ran out of time says so and points at the snapshot', () => {
     matched: false, waitedMs: 10_000, url: 'https://example.test/form', title: 'Form', tabs: TABS,
   })
   assert.match(text, /^Waited 10\.0 s and nothing matched text "ready"; take a browser_snapshot/)
+})
+
+test('a wait for a usable element reads its two outcomes differently', () => {
+  // The distinction the wait exists for: "the page has not enabled it yet" is
+  // not "nothing by that name is here".
+  assert.match(
+    waitText({ role: 'button', name: 'Submit', enabled: true }, {
+      matched: true, waitedMs: 3_200, url: 'https://example.test/form', title: 'Form',
+      element: { role: 'button', name: 'Submit' }, matches: 1, tabs: TABS,
+    }),
+    /^Waited 3\.2 s — button "Submit" is on the page and can take a press\./,
+  )
+  assert.match(
+    waitText({ role: 'button', name: 'Submit', enabled: true }, {
+      matched: false, waitedMs: 5_000, url: 'https://example.test/form', title: 'Form',
+      matches: 1, disabled: 1, tabs: TABS,
+    }),
+    new RegExp(
+      '^Waited 5\\.0 s and nothing usable matched button "Submit"; the element it names is on the '
+      + 'page, and the page says it is disabled; take a browser_snapshot',
+    ),
+  )
 })
 
 test('a wait on an address and a fixed wait each say what they waited for', () => {

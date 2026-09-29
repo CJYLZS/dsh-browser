@@ -70,6 +70,8 @@ export function fakeCdp(): FakeCdp {
       const registered = listeners.get(method) ?? []
       listeners.set(method, registered.filter(candidate => candidate !== listener))
     },
+    // Real sessions answer `detach`; a mirror that releases its session calls it.
+    detach: async (): Promise<void> => {},
   }
   return {
     session: session as unknown as CDPSession,

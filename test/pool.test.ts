@@ -189,6 +189,25 @@ test('the status report says what is running and what the limit is', async () =>
   assert.equal(report.instances[0]?.debugPort, 9333)
 })
 
+test('the pool status read carries every browser fresh tab list', async () => {
+  const { pool, launch } = poolWith()
+  await pool.get('session-a').ensure()
+  const opened = launch.browsers[0]?.openPage('https://example.test/new')
+  assert.ok(opened !== undefined)
+  await new Promise(resolve => { setImmediate(resolve) })
+  launch.browsers[0]?.browserCdp.answers.set('Target.getTargets', () => ({
+    targetInfos: [
+      { targetId: 'target-0', type: 'page', url: 'about:blank', title: 'Renamed blank' },
+      { targetId: 'target-1', type: 'page', url: 'https://example.test/new', title: 'Fresh title' },
+    ],
+  }))
+  const report = await pool.statusAsync()
+  assert.deepEqual(
+    report.instances[0]?.tabs.map(tab => tab.title),
+    ['Renamed blank', 'Fresh title'],
+  )
+})
+
 test('a session id that cannot name a directory fails before a launch', () => {
   const { pool, launch } = poolWith({ userDataDir: 'D:\\profiles' })
   assert.throws(() => pool.get(''), /empty session id/)

@@ -50,6 +50,8 @@ export interface FakePage {
   readonly page: Page
   /** The CDP session this page hands out. */
   readonly cdp: FakeCdp
+  /** The CDP target id this page answers `Target.getTargetInfo` with. */
+  readonly targetId: string
   /** Address the fake reports, as `page.url()` would. */
   url: string
   /**
@@ -97,6 +99,8 @@ export interface FakeBrowser {
   readonly profileDir: string
   /** Pages that existed when the browser started. */
   readonly pages: FakePage[]
+  /** The browser-level CDP session, the one `Target.getTargets` is asked on. */
+  readonly browserCdp: FakeCdp
   /** Whether the browser's context has been closed. */
   readonly closed: boolean
   /**
@@ -196,20 +200,49 @@ export function fakeLauncher(): FakeLaunch {
       const handlers = new Map<string, ((...args: unknown[]) => void)[]>()
       const cdp = fakeCdp()
       let pageClosed = false
+      // One document per page, until the page goes somewhere else: the reports
+      // read state through the document probe (see `stateOf`), which answers
+      // with the instant this document started, so a navigation has to move it
+      // for a replaced document to be tellable from a twice-read one.
+      let documentOrigin = 1_700_000_000_000 + pages.length
       const frame = { url: () => record.url }
       cdp.answers.set('Page.captureScreenshot', { data: Buffer.from('shot').toString('base64') })
       cdp.answers.set('Page.getLayoutMetrics', { cssVisualViewport: { clientWidth: 1280, clientHeight: 720 } })
-      cdp.answers.set('Runtime.evaluate', { result: { value: 'evaluated' } })
-      cdp.answers.set('Target.getTargetInfo', { targetInfo: { targetId: `target-${String(pages.length)}`, url } })
+      cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
+        // The state read asks the document, so the fake answers the way a real
+        // one does: its own address, title, and the instant it started.
+        if (String(params['expression'] ?? '').includes('performance.timeOrigin')) {
+          return {
+            result: { value: { url: record.url, title: `title of ${record.url}`, origin: documentOrigin } },
+          }
+        }
+        return { result: { value: 'evaluated' } }
+      })
+      // A page names itself the way CDP does: one call answers its target id,
+      // address, and title together, which is what the sidebar's 1:1 tab list
+      // is built from. A function, so a page that navigates stops answering
+      // with the address it started on.
+      const targetId = `target-${String(pages.length)}`
+      cdp.answers.set('Target.getTargetInfo', () => ({
+        targetInfo: {
+          targetId,
+          url: record.url,
+          title: `title of ${record.url}`,
+        },
+      }))
       const page = {
         url: () => record.url,
         title: async () => `title of ${record.url}`,
         mainFrame: () => frame,
         goto: async (target: string) => {
           record.url = target
+          documentOrigin += 1
           record.emit('framenavigated', frame)
         },
-        reload: async () => { record.emit('framenavigated', frame) },
+        reload: async () => {
+          documentOrigin += 1
+          record.emit('framenavigated', frame)
+        },
         // A fake page never has a load in flight, so waiting for one is
         // immediately satisfied; what it proves is that an action waits at all.
         waitForLoadState: async () => {},
@@ -231,6 +264,7 @@ export function fakeLauncher(): FakeLaunch {
         page,
         cdp,
         frame,
+        targetId,
         url,
         userAgent: config.headless ? HEADLESS_UA : HEADFUL_UA,
         get closed() { return pageClosed },
@@ -257,6 +291,15 @@ export function fakeLauncher(): FakeLaunch {
       return record
     }
 
+    const browserCdp = fakeCdp()
+    browserCdp.answers.set('Target.getTargets', () => ({
+      targetInfos: pages.filter(entry => !entry.closed).map(entry => ({
+        targetId: entry.targetId,
+        type: 'page',
+        url: entry.url,
+        title: `title of ${entry.url}`,
+      })),
+    }))
     const context = {
       pages: () => pages.filter(entry => !entry.closed).map(entry => entry.page),
       newPage: async () => createPage('about:blank').page,
@@ -265,6 +308,9 @@ export function fakeLauncher(): FakeLaunch {
         if (record === undefined) throw new Error('dsh-browser test: not a page of this context')
         return record.cdp.session as unknown as CDPSession
       },
+      // The persistent context hands out a browser-level session, which is what
+      // `Target.getTargets` — one call, every page's current title — is asked on.
+      browser: () => ({ newBrowserCDPSession: async () => browserCdp.session as unknown as CDPSession }),
       close: async () => {
         if (closed) return
         closed = true
@@ -285,6 +331,7 @@ export function fakeLauncher(): FakeLaunch {
       config,
       profileDir,
       pages,
+      browserCdp,
       get closed() { return closed },
       openPage: (target = 'about:blank') => {
         const created = createPage(target)

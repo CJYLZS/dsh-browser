@@ -500,6 +500,40 @@ test('a query is tested against the properties a line prints, not only its name'
   assert.match(snapshot.text, /Codex documentation/)
 })
 
+test('a query is tested against the line as it prints, attribute names included', () => {
+  // Measured 2026-09-29 on a real page: `level="1"` and `orientation` both
+  // answered "Nothing in the page matches", though both strings are printed on
+  // the lines a reader was reading — the fields carried attribute values but
+  // not their names, while the miss message still claimed the printed text was
+  // what was searched.
+  const page = [
+    node({ nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Page' }, childIds: ['2', '3', '4'] }),
+    node({
+      nodeId: '2',
+      role: { value: 'heading' },
+      name: { value: 'Drag & Drop Demo' },
+      properties: [{ name: 'level', value: { value: '1' } }],
+    }),
+    node({
+      nodeId: '3',
+      role: { value: 'tablist' },
+      properties: [{ name: 'orientation', value: { value: 'horizontal' } }],
+    }),
+    node({
+      nodeId: '4',
+      role: { value: 'button' },
+      name: { value: 'Submit' },
+      properties: [{ name: 'disabled', value: { value: 'true' } }],
+    }),
+  ]
+  const byComposed = formatAxTree(page, { find: parseQuery('level="1"') })
+  assert.match(byComposed.text, /heading "Drag & Drop Demo" level="1"/)
+  const byName = formatAxTree(page, { find: parseQuery('orientation') })
+  assert.match(byName.text, /tablist orientation="horizontal"/)
+  const byState = formatAxTree(page, { find: parseQuery('disabled') })
+  assert.match(byState.text, /button "Submit" \[disabled\]/)
+})
+
 test('text split across sibling runs is matched as the one line it prints as', () => {
   // A model searching for a phrase reads it in the snapshot as one line; the
   // page wrote it as several text nodes, and a query has to see the same words.

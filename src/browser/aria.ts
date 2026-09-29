@@ -316,16 +316,6 @@ function lineOf(
   return line
 }
 
-/** What one node says, for a query to test. */
-function fieldsOf(node: AxNode, whitelist: readonly string[]): string[] {
-  return [
-    roleOf(node),
-    nameOf(node),
-    text(node.value?.value),
-    ...attributesOf(node, whitelist).map(([, value]) => value),
-  ].filter(field => field !== '')
-}
-
 /**
  * The refs one page hands out.
  *
@@ -668,7 +658,14 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
       // is where a reader would see the text anyway.
       if (printable.has(candidate)) {
         const run = runText.get(candidate)
-        const fields = run === undefined ? fieldsOf(candidate, whitelist) : [run, ...fieldsOf(candidate, whitelist)]
+        // The words a reader searches are the words the snapshot prints, so the
+        // line itself is what a query tests — attribute names and their
+        // `key="value"` spelling included. The fields this used to test carried
+        // the values and not the names, which is how `level="1"` missed while
+        // the miss message still claimed the printed text was searched
+        // (measured 2026-09-29 on a real page).
+        const line = lineOf(candidate, undefined, whitelist, false)
+        const fields = run === undefined ? [line] : [run, line]
         if (query.matches(fields)) {
           matches.add(candidate)
           for (const ancestor of path) ancestors.add(ancestor)

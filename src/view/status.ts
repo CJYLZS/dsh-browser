@@ -35,7 +35,7 @@ export function registerStatus(ctx: Context, pool: BrowserPool): void {
     scoped.effect(() => scoped.webServer.register({
       kind: 'exact',
       path: STATUS_PATH,
-      handler: (request, response) => {
+      handler: async (request, response) => {
         const rejection = scoped.connection.requestRejection(request)
         if (rejection !== undefined) {
           response.writeHead(rejection, { 'Content-Type': 'text/plain' })
@@ -48,7 +48,9 @@ export function registerStatus(ctx: Context, pool: BrowserPool): void {
           // browsers' answer.
           'Cache-Control': 'no-store',
         })
-        response.end(JSON.stringify(pool.status()))
+        // The tab list is read fresh — the titles pages carry now — which is
+        // what the sidebar's 1:1 tabs and the banner's page counts answer with.
+        response.end(JSON.stringify(await pool.statusAsync()))
       },
     }), 'dsh-browser: status route')
   })

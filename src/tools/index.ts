@@ -197,6 +197,12 @@ export interface WaitValue {
   readonly element?: ElementRef
   /** How many elements an element condition matched when the wait ended. */
   readonly matches?: number
+  /**
+   * How many of the matched elements the page says are disabled, when the
+   * condition asked for one that can take a press and none could — the fact
+   * that separates "the page has not enabled it yet" from "it never appeared".
+   */
+  readonly disabled?: number
   /** What the page changed while the wait ran. */
   readonly changes?: readonly DomChange[]
   /** How many further changes were seen and are not itemised here. */
@@ -250,6 +256,7 @@ export function waitText(
     readonly name?: string
     readonly text?: string
     readonly selector?: string
+    readonly enabled?: boolean
     readonly url?: string
     readonly time?: number
   },
@@ -259,13 +266,22 @@ export function waitText(
   const title = value.title === '' ? '' : ` — ${JSON.stringify(value.title)}`
   let head: string
   if (!value.matched) {
-    head = `Waited ${seconds} and nothing matched ${waitedFor(args)}`
+    const wanted = args.enabled === true ? 'nothing usable matched' : 'nothing matched'
+    // A wait that asked for something it could act on gets told when the element
+    // is there and merely unusable: "the page has not enabled it yet" and "it
+    // never appeared" are different next steps.
+    const still = value.disabled === undefined || value.disabled === 0
+      ? ''
+      : `; ${value.disabled === 1 ? 'the element it names is' : `all ${String(value.disabled)} elements it names are`}`
+        + ` on the page, and the page says ${value.disabled === 1 ? 'it is' : 'they are'} disabled`
+    head = `Waited ${seconds} and ${wanted} ${waitedFor(args)}${still}`
       + '; take a browser_snapshot to see what the page says now'
   } else if (value.matches !== undefined && value.matches > 1) {
     head = `Waited ${seconds} — ${String(value.matches)} elements match ${waitedFor(args)}`
       + '; a click on this locator would be refused as ambiguous, so narrow it'
   } else if (value.element !== undefined) {
     head = `Waited ${seconds} — ${describeElement(value.element)} is on the page`
+      + (args.enabled === true ? ' and can take a press' : '')
   } else if (args.url !== undefined) {
     head = `Waited ${seconds} — the address contains ${JSON.stringify(args.url)}`
   } else {
@@ -548,6 +564,12 @@ const TABS_SCHEMA = {
       index: { type: 'integer', required: true },
       url: { type: 'string', required: true },
       active: { type: 'boolean', required: true },
+      // The page's CDP target id and its last title: the identity the
+      // sidebar's own tabs are built from, and the fact that tells pages on
+      // the same address apart. Both are absent only in the moment between a
+      // page existing and its session answering for it.
+      targetId: { type: 'string' },
+      title: { type: 'string' },
     },
   },
 } as const
@@ -678,6 +700,7 @@ const WAIT_PROPERTIES = {
   title: { type: 'string', required: true },
   element: ELEMENT_SCHEMA,
   matches: { type: 'integer' },
+  disabled: { type: 'integer' },
   changes: CHANGES_SCHEMA,
   changesOmitted: { type: 'integer' },
 } as const
@@ -899,6 +922,7 @@ function dialogOptions(args: {
  */
 const WAIT_PARAMETERS = {
   url: { type: 'string', description: 'Wait until the address the page shows contains this text, without regard to case.' },
+  enabled: { type: 'boolean', description: 'Wait until the element this call names can take a press: it is on the page and the page does not say it is disabled. Give it with text, role+name, or selector — an address or a fixed time has nothing to be enabled.' },
   time: { type: 'integer', description: 'Wait this many milliseconds with nothing to observe — the last resort, for a page that cannot be asked anything yet. Prefer a condition: a condition returns the moment it holds, and reports what the page did meanwhile.' },
   timeoutMs: { type: 'integer', description: `How long to wait before reporting that the condition has not held, in milliseconds; default ${String(WAIT_DEFAULT_MS)}, at most ${String(WAIT_MAX_MS)}. The result says which happened either way, so a timeout is an answer rather than a failure.` },
 } as const
@@ -915,11 +939,20 @@ function waitCondition(args: {
   readonly name?: string
   readonly text?: string
   readonly selector?: string
+  readonly enabled?: boolean
   readonly url?: string
   readonly time?: number
   readonly timeoutMs?: number
 }): WaitCondition {
   const locator = locatorOf(args, 'browser_wait', { mentionRef: false })
+  // Not a condition of its own: "usable" is a question about an element, so a
+  // call that asked for it must also say which element it means.
+  if (args.enabled === true && locator === undefined) {
+    throw new Error(
+      'dsh-browser: browser_wait was given enabled without an element to wait for; give it with '
+      + 'role+name, text, or selector — an address or a fixed time has nothing that can be enabled',
+    )
+  }
   const given = [locator !== undefined, args.url !== undefined, args.time !== undefined]
     .filter(condition => condition).length
   if (given === 0) {
@@ -959,6 +992,7 @@ function waitCondition(args: {
   }
   return {
     ...locator === undefined ? {} : { locator },
+    ...args.enabled !== true ? {} : { enabled: true },
     ...args.url === undefined ? {} : { url: args.url },
     ...args.time === undefined ? {} : { timeMs: args.time },
   }
@@ -1112,10 +1146,10 @@ export function registerTools(ctx: Context, pool: BrowserPool): void {
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'browser_click',
-    description: 'Click an element, with real mouse events at the element\'s own position. Name the element with a ref from browser_snapshot, or — when the page re-rendered and the ref is refused, or two controls share a name — with role+name, text, or a CSS selector, which are resolved when the click runs. Reports the element, the address the page ended on, whether the page changed and the first few changes it made, and what received the click when something was over it. A press the page says another element would receive is refused; pass force to send it anyway.',
+    description: 'Click an element, with real mouse events at the element\'s own position. Name the element with a ref from browser_snapshot, or — when the page re-rendered and the ref is refused, or two controls share a name — with role+name, text, or a CSS selector, which are resolved when the click runs. Reports the element, the address the page ended on, whether the page changed and the first few changes it made, and what received the click when something was over it. A press the page says another element would receive is refused; pass force to send it anyway. An element the page says is disabled is refused too, and force does not bypass that: the page would drop the press either way.',
     parameters: {
       ...TARGET_PARAMETERS,
-      force: { type: 'boolean', description: 'Click even when the page says another element would receive the press, such as an overlay. What received it is then reported instead of refused.' },
+      force: { type: 'boolean', description: 'Click even when the page says another element would receive the press, such as an overlay. What received it is then reported instead of refused. It does not bypass an element the page says is disabled, which would drop the press either way.' },
       button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Which button presses; left unless given. A right click is how a page\'s own context menu opens.' },
       double: { type: 'boolean', description: 'Send the two press-release pairs a page reads as one double click, instead of one click.' },
       ...DIALOG_PARAMETERS,
@@ -1298,7 +1332,7 @@ export function registerTools(ctx: Context, pool: BrowserPool): void {
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'browser_wait',
-    description: 'Wait until the page reaches a state, then report whether it did. Give exactly one condition: text (a case-insensitive substring of an element\'s name), role with name, selector, url (a case-insensitive substring of the address), or time (a fixed wait, the last resort when the page cannot be asked anything yet). Waits on the page already open — it does not start a browser. A condition that has not held before the budget is not an error: the result says matched: false, how long it waited, where the page is now, and what it changed meanwhile, which is what tells "still starting" from "this page will never do it".',
+    description: 'Wait until the page reaches a state, then report whether it did. Give exactly one condition: text (a case-insensitive substring of an element\'s name), role with name, selector, url (a case-insensitive substring of the address), or time (a fixed wait, the last resort when the page cannot be asked anything yet). Add enabled: true to an element condition to wait until that element can actually take a press — the page no longer says it is disabled. Waits on the page already open — it does not start a browser. A condition that has not held before the budget is not an error: the result says matched: false, how long it waited, where the page is now, and what it changed meanwhile, which is what tells "still starting" from "this page will never do it".',
     parameters: {
       ...LOCATOR_PARAMETERS,
       ...WAIT_PARAMETERS,

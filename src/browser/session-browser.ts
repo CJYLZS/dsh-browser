@@ -33,6 +33,7 @@ import {
   type SnapshotOptions,
   type SnapshotTarget,
 } from './aria.ts'
+import { mergeFrameTrees, type FrameTree } from './frame-trees.ts'
 import { pageInfoFromMetrics, type PageInfo } from './page-info.ts'
 import { PortAllocator } from './ports.ts'
 import { profileDirFor } from './profile.ts'
@@ -59,6 +60,15 @@ export interface TabSummary {
   readonly url: string
   /** Whether this is the page the tools and the mirror act on. */
   readonly active: boolean
+  /**
+   * The page's CDP target id — its stable identity, the same one external
+   * DevTools and Playwright see. Absent only in the moment between a page
+   * existing and its session answering `Target.getTargetInfo`; the sidebar can
+   * mirror only pages it can name.
+   */
+  readonly targetId?: string
+  /** What the page last said its title was, when that is known. */
+  readonly title?: string
 }
 
 /** Everything a viewer needs to say what it is looking at. */
@@ -86,6 +96,16 @@ export interface BrowserStatus {
 
 /** Receives every mirrored frame while subscribed. */
 export type FrameListener = (frame: MirrorFrame) => void
+
+/** One page's mirror: the session it is watched on, its stream, its viewers. */
+interface PageMirror {
+  /** The CDP session this mirror attached itself — never `adopt`'s own. */
+  cdp: CDPSession
+  /** Stops the screen cast. */
+  stop: () => Promise<void>
+  /** Everyone watching this page; frames go to each of them. */
+  readonly viewers: Set<FrameListener>
+}
 
 /** Starts a browser; the seam that keeps this class testable without one. */
 export type Launcher = (config: LaunchConfig, userDataDir: string) => Promise<BrowserSession>
@@ -179,6 +199,26 @@ const UNREACHABLE_REASON = 'the browser did not answer after the call that was c
 const SETTLE_NAVIGATION_MS = 2_000
 
 /**
+ * How long an action gives the browser to say that a tab it just opened exists,
+ * and the shape of the world the report has to describe.
+ *
+ * Measured 2026-09-29: a click whose `window.open` takes effect is adopted
+ * after the protocol call returns, and two of three such clicks reported the
+ * page they left behind — the tab list a result carries exists to prevent
+ * exactly that. The beat is paid once per action; a page set that holds still
+ * through it is the answer either way.
+ */
+const ADOPTION_GRACE_MS = 100
+
+/**
+ * How long a status read waits for the browser's own target list.
+ *
+ * The list never touches a renderer, so a page that is busy cannot hold it;
+ * the budget is for a browser process that has stopped answering at all.
+ */
+const TARGET_TITLES_MS = 1_000
+
+/**
  * Where an armed settle probe parks its promise on the page.
  *
  * A slot per action rather than one fixed name: two actions in flight on the
@@ -202,6 +242,16 @@ interface PageState {
   readonly url: string
   /** Document title at the time. */
   readonly title: string
+  /**
+   * When this document started, from `performance.timeOrigin`.
+   *
+   * Two reads of one document answer the same number, and no two documents
+   * share one, so "the document this read describes" is a fact a comparison can
+   * use: a click that replaced the document reads a different origin even when
+   * the address and the title it replaced are identical — which is exactly the
+   * shape a form POST that answers with the same page has.
+   */
+  readonly origin: number
 }
 
 /** The element an action landed on, as the snapshot described it. */
@@ -263,6 +313,8 @@ const WAIT_POLL_MS = 250
 export interface WaitCondition {
   /** Wait until an element this locator names is on the page. */
   readonly locator?: Locator
+  /** Wait until the element this locator names can actually take a press. */
+  readonly enabled?: boolean
   /** Wait until the address the page shows contains this text, without regard to case. */
   readonly url?: string
   /** Wait this long with nothing to observe: the last resort, for a page that cannot be asked yet. */
@@ -292,6 +344,15 @@ export interface WaitReport {
   readonly element?: ElementRef
   /** How many elements an element condition matched when the wait ended. */
   readonly matches?: number
+  /**
+   * How many of the matched elements the page says are disabled, when the
+   * condition asked for one that can take a press and none could.
+   *
+   * This is the difference the whole result exists for: "the element is there
+   * and the page has not enabled it yet" is a different next step from "nothing
+   * by that name has appeared".
+   */
+  readonly disabled?: number
   /** What the page changed while the wait ran, the first few of them. */
   readonly changes?: readonly DomChange[]
   /** How many further changes were seen and are not itemised here. */
@@ -686,10 +747,17 @@ function readChange(entry: unknown): DomChange | undefined {
   const reported = entry as Record<string, unknown>
   const kind = reported['kind']
   if (kind !== 'added' && kind !== 'removed' && kind !== 'attribute' && kind !== 'text') return undefined
-  /** One field, when the page said it as a non-empty string. */
+  /** One field, when the page said it as a string worth printing. */
   const said = (field: string): string | undefined => {
     const value = reported[field]
-    if (typeof value !== 'string' || value === '') return undefined
+    if (typeof value !== 'string') return undefined
+    // An empty string is dropped from every field except the two that compare
+    // before and after: a boolean attribute is spelled `disabled=""`, so "the
+    // attribute was there and empty" is a real value and the only thing that
+    // tells an addition from a removal. Measured 2026-09-29 on a real button:
+    // without this, `disabled` being added and being removed both printed as
+    // `(none) → (none)`.
+    if (value === '' && field !== 'from' && field !== 'to') return undefined
     return value.length > CHANGE_TEXT_MAX ? `${value.slice(0, CHANGE_TEXT_MAX)}…` : value
   }
   const fields = Object.fromEntries(
@@ -903,8 +971,183 @@ interface PressPoint {
   readonly moved: boolean
   /** Whether the point is outside the outermost viewport this plugin can see. */
   readonly outside: boolean
+  /** Whether the page says the element cannot take a press at all. */
+  readonly disabled: boolean
   /** What the page says is at the point, when it is not the element. */
   readonly over?: ElementRef
+}
+
+/**
+ * The in-page question "would the page take a press on this element".
+ *
+ * One string because two callers ask it: a press, before it is dispatched, and a
+ * wait that was asked for an element that can actually be acted on. The
+ * `:disabled` pseudo-class is the question rather than the `disabled` property,
+ * because the pseudo-class is what a disabled fieldset, optgroup, or datalist
+ * propagates through, and the walk up is what catches an element inside a
+ * disabled control — a press on the span inside a disabled button reaches
+ * nothing. It is a snippet rather than a whole probe so the two cannot drift.
+ */
+const REFUSES_A_PRESS_JS = `const refuses = (node) => {
+      let current = node
+      for (let hop = 0; current !== null && hop < 32; hop += 1) {
+        try {
+          if (typeof current.matches === 'function' && current.matches(':disabled')) return true
+        } catch {
+          // A node this cannot be asked about is not disabled by that fact.
+        }
+        if (current.getAttribute !== undefined && current.getAttribute('aria-disabled') === 'true') return true
+        current = current.parentElement
+      }
+      return false
+    }`
+
+/**
+ * The in-page question a wait asks about the element it matched.
+ *
+ * The same question a press asks, so a wait for "an element I can act on" cannot
+ * disagree with the press that follows it.
+ * @returns the function to call on the element a condition matched.
+ */
+function enabledProbe(): string {
+  return `function () {
+    ${REFUSES_A_PRESS_JS}
+    return { dis: refuses(this.nodeType === 1 ? this : this.parentElement) }
+  }`
+}
+
+/**
+ * The page's own verdict on whether an element can take a press.
+ *
+ * A page that says nothing usable does not block a wait: this is a question the
+ * page answers, not a requirement it has to satisfy, and the same shape of
+ * answer — a node CDP has already replaced — leaves the element counting as one
+ * the caller can act on rather than as a refusal invented here.
+ * @param cdp - session attached to the active page.
+ * @param backendNodeId - the element to ask about.
+ * @returns whether the page says the element is disabled.
+ */
+async function refusesPress(cdp: CDPSession, backendNodeId: number): Promise<boolean> {
+  const resolved = await cdp.send('DOM.resolveNode', { backendNodeId })
+    .catch(() => undefined) as { object?: { objectId?: string } } | undefined
+  const objectId = resolved?.object?.objectId
+  if (objectId === undefined) return false
+  const answer = await cdp.send('Runtime.callFunctionOn', {
+    objectId,
+    functionDeclaration: enabledProbe(),
+    returnByValue: true,
+  }).catch(() => undefined) as { result?: { value?: unknown } } | undefined
+  const value = answer?.result?.value
+  if (typeof value !== 'object' || value === null) return false
+  return (value as Record<string, unknown>)['dis'] === true
+}
+
+/**
+ * The in-page question "what does this document say it is".
+ *
+ * Asked of the document rather than read through the protocol's convenience,
+ * because the convenience invents an answer when the page cannot give one:
+ * measured 2026-09-29, a form POST that answers with the same page made
+ * `page.title()` return `Loading <url>` — its own placeholder for "the
+ * evaluation could not run" — and the report printed a title the page never
+ * had. Waiting for the document to be readable is the wait the old read
+ * skipped, and `performance.timeOrigin` comes back with it, so a comparison can
+ * tell a replaced document from a twice-read one.
+ * @returns the function to evaluate in the page.
+ */
+function documentProbe(): string {
+  return `async function () {
+    if (document.readyState === 'loading') {
+      await new Promise((done) => document.addEventListener('DOMContentLoaded', done, { once: true }))
+    }
+    return { url: location.href, title: document.title, origin: performance.timeOrigin }
+  }`
+}
+
+/** The page-side slot a selector's matches wait in, one call at a time. */
+const MATCH_SLOT = '__dshMatches'
+
+/**
+ * The in-page question "what does this selector match, everywhere on the page".
+ *
+ * The DOM agent's own query selector is asked first, inside the probe, because
+ * a selector the page cannot parse is a question that was never asked — and
+ * reporting that as "no element matches" would send the caller looking for
+ * another element instead of at its own typo. The walk then goes where the
+ * agent's traversal cannot follow: an open shadow root through its host, and a
+ * frame through its content document, same-origin only, which is the same
+ * scope the accessibility tree splices. Measured 2026-09-29 on the browser
+ * this plugin runs: the agent's query selector and `DOM.performSearch` both
+ * answered zero for `#shadow-host .box` and `iframe[name=iframe1] button`,
+ * although both elements exist.
+ *
+ * The matches are left in the page's slot and counted, rather than returned,
+ * because a value that crosses the protocol boundary as a handle is what the
+ * per-match node id needs.
+ * @param selector - what the caller wrote.
+ * @param slot - the page-side slot to leave the matches in.
+ * @returns the expression to evaluate in the page.
+ */
+function selectorProbe(selector: string, slot: string): string {
+  return `(() => {
+    const selector = ${JSON.stringify(selector)}
+    document.createDocumentFragment().querySelector(selector)
+    const found = []
+    const walk = (parent) => {
+      for (const element of parent.children) {
+        try {
+          if (element.matches(selector)) found.push(element)
+        } catch {
+          // A node this cannot ask is not a match by that fact.
+        }
+        if (element.shadowRoot !== null) walk(element.shadowRoot)
+        walk(element)
+      }
+    }
+    const visit = (document, hops) => {
+      if (hops > 8) return
+      walk(document)
+      for (const frame of document.querySelectorAll('iframe, frame')) {
+        const inner = frame.contentDocument
+        if (inner !== null) visit(inner, hops + 1)
+      }
+    }
+    visit(globalThis.document, 0)
+    globalThis.${slot} = found
+    return found.length
+  })()`
+}
+
+/** How many child frames one snapshot splices in, counting nested ones. */
+const FRAME_TREES_MAX = 12
+
+/** The frame tree as `Page.getFrameTree` answers it: a frame and its children. */
+interface FrameTreePayload {
+  readonly frame?: { readonly frameId?: string }
+  readonly childFrames?: readonly FrameTreePayload[]
+}
+
+/**
+ * The frame ids of every child frame in the tree, parents before children.
+ *
+ * The order matters: a nested frame's owner lives inside its parent frame's
+ * content, so the parent has to be spliced in before the child can find where
+ * it hangs.
+ * @param tree - the payload `Page.getFrameTree` answered with.
+ * @returns the child frame ids, deepest last.
+ */
+function childFrameIds(tree: FrameTreePayload | undefined): string[] {
+  const ids: string[] = []
+  const walk = (node: FrameTreePayload | undefined): void => {
+    if (node === undefined) return
+    for (const child of node.childFrames ?? []) {
+      const id = child.frame?.frameId
+      if (id !== undefined) ids.push(id)
+      walk(child)
+    }
+  }
+  walk(tree)
+  return ids
 }
 
 /**
@@ -954,7 +1197,9 @@ function pressProbe(): string {
       frame = parent === null ? null : parent.frameElement
     }
     const inView = outer !== null && x >= 0 && y >= 0 && x < outer.innerWidth && y < outer.innerHeight
-    if (!inView) return { ok: true, x, y, moved, inView, mine: false, over: null }
+    ${REFUSES_A_PRESS_JS}
+    const disabled = refuses(element)
+    if (!inView) return { ok: true, x, y, moved, inView, dis: disabled, mine: false, over: null }
     // What the page says is at the point, and whether that is the element or
     // something inside it: a press on either one reaches the element.
     const within = (node) => {
@@ -974,10 +1219,10 @@ function pressProbe(): string {
       top = inner
     }
     const mine = top !== null && (top === element || element.contains(top) || within(top))
-    if (mine || top === null) return { ok: true, x, y, moved, inView, mine, over: null }
+    if (mine || top === null) return { ok: true, x, y, moved, inView, dis: disabled, mine, over: null }
     const name = top.getAttribute('aria-label') ?? top.textContent ?? ''
     return {
-      ok: true, x, y, moved, inView, mine,
+      ok: true, x, y, moved, inView, dis: disabled, mine,
       over: {
         role: top.getAttribute('role') ?? top.tagName.toLowerCase(),
         name: String(name).replace(/\\s+/g, ' ').trim().slice(0, 80),
@@ -1012,6 +1257,7 @@ function readPress(value: unknown): PressPoint | 'boxless' | undefined {
     y,
     moved: said['moved'] === true,
     outside: said['inView'] === false,
+    disabled: said['dis'] === true,
     ...typeof role === 'string'
       ? { over: { role, name: typeof name === 'string' ? name : '' } }
       : {},
@@ -1327,7 +1573,17 @@ export class SessionBrowser {
   private launchedHeadless: boolean | undefined
   private starting: Promise<void> | undefined
   private stream: (() => Promise<void>) | undefined
-  private viewport: { at: number; size: { width: number; height: number } } | undefined
+  /** The browser-level CDP session `Target.getTargets` is asked on, kept for the browser's life. */
+  private browserCdp: CDPSession | undefined
+  /**
+   * The CSS viewport each page reported last, keyed by how it is driven: a
+   * target id for a named page, `active` for the un-named one.
+   *
+   * Cached so a pointer move is not a round trip; a navigation replaces the
+   * document and the viewport with it, and an adoption replaces which page
+   * `active` means.
+   */
+  private readonly viewports = new Map<string, { at: number; size: { width: number; height: number } }>()
   /**
    * Labels this page has handed out, by ref.
    *
@@ -1351,6 +1607,28 @@ export class SessionBrowser {
    * browser and clears this.
    */
   private userClosed = false
+  /**
+   * Pages this browser holds, by their CDP target id.
+   *
+   * The target id is the page's stable identity — external DevTools sees the
+   * same one — and it is what the sidebar's tabs name, so a tab keeps pointing
+   * at its page across navigations and active-page changes. Filled when a page
+   * is adopted (one `Target.getTargetInfo` on the page's own session), dropped
+   * when the page goes.
+   */
+  private readonly pageIds = new Map<Page, string>()
+  /** What each page last said its title was, by target id. */
+  private readonly titles = new Map<string, string>()
+  /**
+   * One mirror per page someone is watching, by target id.
+   *
+   * A viewer names the page it wants, so two panes on two pages run two screen
+   * casts, and the page the tools act on has nothing to do with what a pane
+   * shows. Each mirror owns the CDP session it watches on — never the one
+   * `adopt()` attaches for the active page — because that session is the one a
+   * later adoption detaches.
+   */
+  private readonly mirrors = new Map<string, PageMirror>()
   /** How many settle probes this browser has armed, for a slot no two share. */
   private settleSeq = 0
   /**
@@ -1419,6 +1697,17 @@ export class SessionBrowser {
       await this.closeStream()
       await this.openStream()
     }
+    if (!sameEncoding(previous, next)) {
+      // A named mirror keeps its own stream; an encoding change is its to
+      // apply too, and a page that went away while it held a stream is dropped.
+      for (const [targetId, mirror] of [...this.mirrors]) {
+        if (mirror.viewers.size === 0) continue
+        await this.attachMirrorStream(targetId, mirror).catch((error: unknown) => {
+          this.logger.warn(error instanceof Error ? error : new Error(String(error)))
+          this.dropMirror(targetId)
+        })
+      }
+    }
   }
 
   /** The current status snapshot. */
@@ -1433,12 +1722,84 @@ export class SessionBrowser {
       mode: this.launchedHeadless === undefined
         ? undefined
         : this.launchedHeadless ? 'headless' : 'headful',
-      tabs: pages.map((page, index) => ({
-        index,
-        url: page.url(),
-        active: page === this.page,
-      })),
+      tabs: pages.map((page, index) => {
+        const targetId = this.pageIds.get(page)
+        return {
+          index,
+          url: page.url(),
+          active: page === this.page,
+          ...(targetId === undefined ? {} : { targetId }),
+          ...(targetId === undefined ? {} : { title: this.titles.get(targetId) ?? '' }),
+        }
+      }),
       error: this.reason,
+    }
+  }
+
+  /**
+   * The status snapshot with the titles the pages carry now.
+   *
+   * The title a page reported when it was adopted is a memory; this read asks
+   * the browser's own target list — one call that never touches a renderer, so
+   * a busy page cannot hold it — and falls back to the memory when the list
+   * cannot be asked.
+   * @returns the status, with a tab list as fresh as the browser can answer.
+   */
+  async statusAsync(): Promise<BrowserStatus> {
+    return { ...this.status(), tabs: await this.pageTabs() }
+  }
+
+  /**
+   * The pages this browser holds, each named by its CDP target id.
+   *
+   * Pages the browser no longer holds are left out, and so is a page this class
+   * could not name: the sidebar can mirror only pages it can name, and a list
+   * that counted an unnameable page would promise a tab that cannot exist.
+   * @returns one entry per nameable page, in the browser's own order.
+   */
+  async pageTabs(): Promise<TabSummary[]> {
+    const pages = this.session?.context.pages() ?? []
+    const named: { page: Page; index: number; targetId: string }[] = []
+    for (const [index, page] of pages.entries()) {
+      const targetId = this.pageIds.get(page)
+      if (targetId !== undefined) named.push({ page, index, targetId })
+    }
+    if (named.length === 0) return []
+    const fresh = await this.targetTitles()
+    return named.map(({ page, index, targetId }) => ({
+      index,
+      url: page.url(),
+      active: page === this.page,
+      targetId,
+      title: fresh.get(targetId) ?? this.titles.get(targetId) ?? '',
+    }))
+  }
+
+  /**
+   * Every page's current title, from one browser-level `Target.getTargets`.
+   * @returns titles by target id; empty when the list cannot be asked.
+   */
+  private async targetTitles(): Promise<Map<string, string>> {
+    const browser = this.session?.context.browser()
+    if (browser === null || browser === undefined) return new Map()
+    try {
+      if (this.browserCdp === undefined) this.browserCdp = await browser.newBrowserCDPSession()
+      const answer = await until(this.browserCdp.send('Target.getTargets'), TARGET_TITLES_MS) as {
+        settled: boolean
+        value?: { targetInfos?: { targetId?: unknown; type?: unknown; title?: unknown }[] }
+      }
+      const titles = new Map<string, string>()
+      if (!answer.settled) return titles
+      for (const info of answer.value?.targetInfos ?? []) {
+        if (info.type !== 'page') continue
+        if (typeof info.targetId === 'string' && typeof info.title === 'string') {
+          titles.set(info.targetId, info.title)
+        }
+      }
+      return titles
+    } catch {
+      // A browser that refuses the list is one the memory answers for.
+      return new Map()
     }
   }
 
@@ -1513,8 +1874,12 @@ export class SessionBrowser {
   }
 
   /**
-   * Subscribe a viewer. The first subscriber starts the stream, the last one
-   * leaving stops it.
+   * Subscribe a viewer to the active page. The first subscriber starts the
+   * stream, the last one leaving stops it.
+   *
+   * This is the un-named subscription: a viewer that names no page watches what
+   * the tools act on, which is what the pane did before tabs named their page.
+   * A pane that names one subscribes with {@link addPageViewer} instead.
    * @param listener - receives every frame while subscribed.
    * @returns unsubscribe callback.
    */
@@ -1525,6 +1890,105 @@ export class SessionBrowser {
       this.viewers.delete(listener)
       if (this.viewers.size === 0) void this.closeStream()
     }
+  }
+
+  /**
+   * Subscribe a viewer to one page, named by its CDP target id.
+   *
+   * The page must already exist — a viewer names a page the tab list reported,
+   * and nothing here starts a browser to go looking for one. Two viewers of the
+   * same page share one screen cast; the first one in starts it, the last one
+   * out stops it and drops the session the mirror attached on.
+   * @param listener - receives every frame of this page while subscribed.
+   * @param targetId - the page's CDP target id, as the tab list reports it.
+   * @returns unsubscribe callback.
+   * @throws {Error} when no page by that id exists.
+   */
+  async addPageViewer(listener: FrameListener, targetId: string): Promise<() => void> {
+    const existing = this.mirrors.get(targetId)
+    if (existing !== undefined) {
+      existing.viewers.add(listener)
+      return this.pageViewerDisposer(existing, targetId, listener)
+    }
+    const mirror: PageMirror = {
+      cdp: undefined as unknown as CDPSession,
+      stop: async () => {},
+      viewers: new Set<FrameListener>([listener]),
+    }
+    this.mirrors.set(targetId, mirror)
+    try {
+      await this.attachMirrorStream(targetId, mirror)
+    } catch (error) {
+      this.mirrors.delete(targetId)
+      throw error
+    }
+    return this.pageViewerDisposer(mirror, targetId, listener)
+  }
+
+  /** The unsubscribe callback of one page viewer: last out closes the mirror. */
+  private pageViewerDisposer(mirror: PageMirror, targetId: string, listener: FrameListener): () => void {
+    return () => {
+      mirror.viewers.delete(listener)
+      if (mirror.viewers.size === 0 && this.mirrors.get(targetId) === mirror) {
+        void this.closeMirror(targetId)
+      }
+    }
+  }
+
+  /** Attach a mirror's CDP session and screen cast, replacing any stream it had. */
+  private async attachMirrorStream(targetId: string, mirror: PageMirror): Promise<void> {
+    const page = this.pageByTargetId(targetId)
+    if (page === undefined) {
+      throw new Error(`dsh-browser: session ${this.sessionId} has no page ${targetId}`)
+    }
+    const context = this.session?.context
+    if (context === undefined) throw new Error(this.unusable())
+    const cdp = await context.newCDPSession(page)
+    mirror.cdp = cdp
+    await mirror.stop().catch(() => {})
+    mirror.stop = await startScreencast(
+      cdp,
+      {
+        quality: this.config.quality,
+        maxWidth: this.config.maxWidth,
+        maxHeight: this.config.maxHeight,
+        everyNthFrame: this.config.everyNthFrame,
+      },
+      frame => { for (const viewer of mirror.viewers) viewer(frame) },
+      (error: unknown) => {
+        // A refused acknowledgement is the one failure that silently ends the
+        // stream; nothing else observes it, so it is reported here.
+        this.logger.warn(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
+  }
+
+  /** Close one page's mirror: its last viewer left, or the page went away. */
+  private async closeMirror(targetId: string): Promise<void> {
+    const mirror = this.mirrors.get(targetId)
+    if (mirror === undefined) return
+    this.mirrors.delete(targetId)
+    await mirror.stop().catch(() => {})
+    await mirror.cdp.detach().catch(() => {})
+  }
+
+  /** Drop one page's mirror without ceremony: the page it watched is gone. */
+  private dropMirror(targetId: string | undefined): void {
+    if (targetId === undefined) return
+    const mirror = this.mirrors.get(targetId)
+    if (mirror === undefined) return
+    this.mirrors.delete(targetId)
+    void mirror.stop().catch(() => {})
+  }
+
+  /** The page that answers to a CDP target id, if the browser still holds it. */
+  private pageByTargetId(targetId: string): Page | undefined {
+    const context = this.session?.context
+    if (context === undefined) return undefined
+    for (const page of context.pages()) {
+      if (this.pageIds.get(page) === targetId) return page
+    }
+    return undefined
   }
 
   /**
@@ -1687,7 +2151,7 @@ export class SessionBrowser {
       await this.ensure()
       const before = await this.stateOf()
       const page = this.requirePage()
-      this.viewport = undefined
+      this.invalidateViewport(page)
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
       this.publish()
       return await this.settle(before, {})
@@ -1697,8 +2161,9 @@ export class SessionBrowser {
   /** Reload the active page. */
   async reload(): Promise<void> {
     await this.ensure()
-    this.viewport = undefined
-    await this.requirePage().reload({ waitUntil: 'domcontentloaded', timeout: 30_000 })
+    const page = this.requirePage()
+    this.invalidateViewport(page)
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 })
     this.publish()
   }
 
@@ -1861,6 +2326,7 @@ export class SessionBrowser {
       let matched = false
       let element: ElementRef | undefined
       let matches: number | undefined
+      let disabled: number | undefined
       if (condition.timeMs !== undefined) {
         await sleep(Math.min(condition.timeMs, options.timeoutMs))
         matched = true
@@ -1869,6 +2335,7 @@ export class SessionBrowser {
         for (;;) {
           const answered = await this.conditionHolds(condition)
           matches = answered.matches
+          disabled = answered.disabled
           if (answered.held) {
             matched = true
             element = answered.element
@@ -1891,6 +2358,9 @@ export class SessionBrowser {
         title: after.title,
         ...element === undefined ? {} : { element },
         ...matches === undefined ? {} : { matches },
+        // Only when it did not hold: with the wait over, the count is what says
+        // the element the caller waited for is there and merely unusable.
+        ...matched || disabled === undefined || disabled === 0 ? {} : { disabled },
         ...changes.length === 0 ? {} : { changes },
         ...omitted === 0 ? {} : { changesOmitted: omitted },
       }
@@ -1899,13 +2369,15 @@ export class SessionBrowser {
 
   /**
    * Whether a wait's condition holds right now.
-   * @param condition - an element to appear, or an address to contain something.
-   * @returns whether it holds, the element that satisfied it, and how many did.
+   * @param condition - an element to appear or to become one that can be acted
+   * on, or an address to contain something.
+   * @returns whether it holds, the element that satisfied it, how many did, and
+   * how many of those the page says are disabled.
    * @throws {Error} when the page refuses a selector.
    */
   private async conditionHolds(
     condition: WaitCondition,
-  ): Promise<{ held: boolean; element?: ElementRef; matches?: number }> {
+  ): Promise<{ held: boolean; element?: ElementRef; matches?: number; disabled?: number }> {
     if (condition.url !== undefined) {
       const url = this.requirePage().url()
       return { held: url.toLowerCase().includes(condition.url.toLowerCase()) }
@@ -1914,11 +2386,35 @@ export class SessionBrowser {
     // the caller never reaches here.
     if (condition.locator === undefined) return { held: true }
     const candidates = await this.locate(condition.locator)
-    const first = candidates[0]
+    if (condition.enabled !== true) {
+      const first = candidates[0]
+      return {
+        held: candidates.length > 0,
+        matches: candidates.length,
+        ...first === undefined ? {} : { element: { role: first.role, name: first.name } },
+      }
+    }
+    // "On the page" and "usable" are different questions, and only the page can
+    // answer the second one. A candidate the page says is disabled is not what
+    // was waited for; how many there were is carried back so a timeout can say
+    // "it is there, it is just not usable yet" instead of "nothing matched".
+    const cdp = this.cdpSession()
+    let disabled = 0
+    for (const candidate of candidates) {
+      if (await refusesPress(cdp, candidate.backendNodeId)) {
+        disabled += 1
+        continue
+      }
+      return {
+        held: true,
+        matches: candidates.length,
+        element: { role: candidate.role, name: candidate.name },
+      }
+    }
     return {
-      held: candidates.length > 0,
+      held: false,
       matches: candidates.length,
-      ...first === undefined ? {} : { element: { role: first.role, name: first.name } },
+      ...disabled === 0 ? {} : { disabled },
     }
   }
 
@@ -1949,7 +2445,7 @@ export class SessionBrowser {
     const target: SnapshotTarget | undefined = options.target === undefined
       ? undefined
       : await this.resolveTarget(cdp, options.target)
-    const tree = await cdp.send('Accessibility.getFullAXTree') as { nodes?: readonly AxNode[] }
+    const nodes = await this.fullTree(cdp)
     const attributes = listOf(this.config.snapshotAttributes)
     const query = options.find === undefined ? undefined : parseQuery(options.find)
     const shared: SnapshotOptions = {
@@ -1959,7 +2455,6 @@ export class SessionBrowser {
       ...ignore.size === 0 ? {} : { ignore },
       ...query === undefined ? {} : { find: query },
     }
-    const nodes = tree.nodes ?? []
     const boxes = options.boxes === true ? await this.boxesFor(cdp, nodes, shared) : undefined
     const snapshot = formatAxTree(nodes, {
       maxNodes: this.config.snapshotNodes,
@@ -2085,8 +2580,8 @@ export class SessionBrowser {
    * a dialog the click opens.
    * @returns the element that was clicked, where the page ended up, and what changed.
    * @throws {Error} when the target names no element or several, the element has
-   * nothing to click, or (without `force`) the press would be received by
-   * something other than the element.
+   * nothing to click, the page says the element is disabled, or (without `force`)
+   * the press would be received by something other than the element.
    */
   async click(
     target: ElementTarget,
@@ -2099,6 +2594,20 @@ export class SessionBrowser {
       const cdp = this.cdpSession()
       const { target: resolved, recovered, result } = await this.actOn(target, async (found) => {
         const point = await this.pressPoint(cdp, found)
+        // Asked before anything is dispatched, and not something `force` can turn
+        // off: the page drops the press whatever the caller's intent is, so a
+        // "Clicked" here would be the success-shaped lie this whole layer exists
+        // to avoid (2026-09-29: a disabled button answered `Clicked button …`,
+        // while the sibling refusal for typing has named "it is disabled" since
+        // the previous round).
+        if (point.disabled) {
+          throw new Error(
+            `dsh-browser: ${elementName(found)} is disabled, so the page would ignore a press on it and `
+            + 'nothing was clicked; wait for the page to enable it, or take a new snapshot and act on an '
+            + 'element that can take the press (force does not bypass this, because the press would be '
+            + 'dropped either way)',
+          )
+        }
         if (point.outside) {
           throw new Error(
             `dsh-browser: ${elementName(found)} is outside the viewport even after scrolling it into view, `
@@ -2293,9 +2802,7 @@ export class SessionBrowser {
    * @throws {Error} when the page refuses the selector itself.
    */
   private async locate(locator: Locator): Promise<Located[]> {
-    const tree = await this.cdpSession().send('Accessibility.getFullAXTree')
-      .catch(() => undefined) as { nodes?: readonly AxNode[] } | undefined
-    const nodes = tree?.nodes ?? []
+    const nodes = await this.fullTree(this.cdpSession()).catch(() => [] as AxNode[])
     if (locator.selector === undefined) return locateInTree(nodes, locator)
     const bySelector = await this.locateBySelector(locator.selector, nodes)
     if (!locatorIsTreeShaped(locator)) return bySelector
@@ -2304,12 +2811,14 @@ export class SessionBrowser {
   }
 
   /**
-   * The elements a CSS selector matches, read through the DOM.
+   * The elements a CSS selector matches, read through the page.
    *
-   * The tree is consulted for each match so a candidate carries the role and
-   * name a message needs; an element the tree does not describe is reported by
-   * its tag, which is a worse name than a role and a much better one than
-   * nothing at all.
+   * The walk is the page's own (see `selectorProbe`), so a match carries the
+   * role and name the accessibility tree gives it — including the content of
+   * shadow roots and same-origin frames, which the agent's query selector
+   * cannot follow. An element the tree does not describe is reported by its
+   * tag, which is a worse name than a role and a much better one than nothing
+   * at all.
    * @param selector - the CSS selector.
    * @param nodes - the accessibility tree, for naming what was matched.
    * @returns the candidates.
@@ -2317,14 +2826,19 @@ export class SessionBrowser {
    */
   private async locateBySelector(selector: string, nodes: readonly AxNode[]): Promise<Located[]> {
     const cdp = this.cdpSession()
-    const document = await cdp.send('DOM.getDocument', { depth: 0 })
-      .catch(() => undefined) as { root?: { nodeId?: number } } | undefined
-    const root = document?.root?.nodeId
-    if (root === undefined) return []
-    let matched: readonly number[]
+    let count = 0
     try {
-      const answer = await cdp.send('DOM.querySelectorAll', { nodeId: root, selector }) as { nodeIds?: readonly number[] }
-      matched = answer.nodeIds ?? []
+      const answer = await cdp.send('Runtime.evaluate', {
+        expression: selectorProbe(selector, MATCH_SLOT),
+        returnByValue: true,
+      }) as {
+        result?: { value?: unknown }
+        exceptionDetails?: { exception?: { description?: string } }
+      }
+      if (answer.exceptionDetails !== undefined) {
+        throw new Error(answer.exceptionDetails.exception?.description ?? 'the page refused it')
+      }
+      if (typeof answer.result?.value === 'number') count = answer.result.value
     } catch (error) {
       // A selector the page cannot parse is a question that was never asked,
       // and reporting it as "no element matches" would send the caller looking
@@ -2335,17 +2849,22 @@ export class SessionBrowser {
       )
     }
     const found: Located[] = []
-    for (const nodeId of matched) {
-      const answer = await cdp.send('DOM.describeNode', { nodeId })
-        .catch(() => undefined) as { node?: { backendNodeId?: number; nodeName?: string } } | undefined
-      const backendNodeId = answer?.node?.backendNodeId
+    for (let index = 0; index < count; index += 1) {
+      const handle = await cdp.send('Runtime.evaluate', {
+        expression: `globalThis.${MATCH_SLOT}[${String(index)}]`,
+        returnByValue: false,
+      }).catch(() => undefined) as { result?: { objectId?: string } } | undefined
+      const objectId = handle?.result?.objectId
+      if (objectId === undefined) continue
+      const described = await cdp.send('DOM.describeNode', { objectId, depth: 0 }).catch(() => undefined) as { node?: { backendNodeId?: number; nodeName?: string } } | undefined
+      const backendNodeId = described?.node?.backendNodeId
       if (backendNodeId === undefined) continue
       // The tree names the match when it describes it, which is what a refusal
       // lists; when it does not, the element stays described by nothing, and the
       // absence of a trail is reported as exactly that rather than as an answer.
       found.push(entryInTree(nodes, backendNodeId) ?? {
         backendNodeId,
-        role: (answer?.node?.nodeName ?? 'element').toLowerCase(),
+        role: (described?.node?.nodeName ?? 'element').toLowerCase(),
         name: '',
       })
     }
@@ -2376,10 +2895,9 @@ export class SessionBrowser {
    * single element matching it.
    */
   private async findAgain(ref: string, stale: RefTarget): Promise<RefTarget | undefined> {
-    const tree = await this.cdpSession().send('Accessibility.getFullAXTree')
-      .catch(() => undefined) as { nodes?: readonly AxNode[] } | undefined
+    const nodes = await this.fullTree(this.cdpSession()).catch(() => [] as AxNode[])
     const matches: RefTarget[] = []
-    for (const node of tree?.nodes ?? []) {
+    for (const node of nodes) {
       const candidate = refTargetOf(node)
       if (candidate !== undefined && candidate.role === stale.role && candidate.name === stale.name) {
         matches.push(candidate)
@@ -2391,10 +2909,80 @@ export class SessionBrowser {
     return found
   }
 
-  /** What the active page shows right now. */
+  /**
+   * The page's accessibility tree with same-process child frames spliced in.
+   *
+   * Chrome answers the page-level tree with every iframe element carrying no
+   * children, because each frame's tree is a separate answer (measured
+   * 2026-09-29 on a same-origin pair). The frames' trees are fetched per frame
+   * and spliced in at the element that owns each one; a frame in another
+   * process cannot be reached by this connection and is left out rather than
+   * guessed at, as is a frame whose owner the page's own tree does not
+   * describe.
+   * @param cdp - session attached to the active page.
+   * @returns the page's nodes, with the frames' nodes under their owners.
+   */
+  private async fullTree(cdp: CDPSession): Promise<readonly AxNode[]> {
+    const root = await cdp.send('Accessibility.getFullAXTree') as { nodes?: readonly AxNode[] }
+    const nodes = root.nodes ?? []
+    const payload = await cdp.send('Page.getFrameTree').catch(() => undefined) as { frameTree?: FrameTreePayload } | undefined
+    const frameIds = childFrameIds(payload?.frameTree).slice(0, FRAME_TREES_MAX)
+    if (frameIds.length === 0) return nodes
+    const frames: FrameTree[] = []
+    for (const frameId of frameIds) {
+      const [tree, owner] = await Promise.all([
+        cdp.send('Accessibility.getFullAXTree', { frameId })
+          .catch(() => undefined) as { nodes?: readonly AxNode[] } | undefined,
+        cdp.send('DOM.getFrameOwner', { frameId })
+          .catch(() => undefined) as { backendNodeId?: number } | undefined,
+      ])
+      const frameNodes = tree?.nodes
+      const ownerBackendNodeId = owner?.backendNodeId
+      if (frameNodes === undefined || frameNodes.length === 0 || ownerBackendNodeId === undefined) continue
+      frames.push({ ownerBackendNodeId, nodes: frameNodes })
+    }
+    return mergeFrameTrees(nodes, frames)
+  }
+
+  /**
+   * What the active page shows right now.
+   *
+   * Read from the document once the document can answer: a page in the middle
+   * of replacing itself has no title to give, and the protocol's convenience
+   * for that case invents one (see `documentProbe`). A page that never answers
+   * inside the budget still reports the protocol's own address, and the title
+   * is left empty rather than invented.
+   * @param page - the page to read; the active one unless said otherwise.
+   * @returns the address, title, and the instant that document started.
+   */
   private async stateOf(page: Page | undefined = this.page): Promise<PageState> {
-    if (page === undefined) return { url: '', title: '' }
-    return { url: page.url(), title: await page.title().catch(() => '') }
+    if (page === undefined) return { url: '', title: '', origin: 0 }
+    if (page !== this.page) {
+      // A page this session is not attached to has no probe of its own here;
+      // the protocol's read is the honest one for it.
+      return { url: page.url(), title: await page.title().catch(() => ''), origin: 0 }
+    }
+    const deadline = Date.now() + SETTLE_NAVIGATION_MS
+    for (;;) {
+      const said = await (async (): Promise<PageState | undefined> => {
+        try {
+          const value = await this.evaluateIn(this.cdpSession(), `(${documentProbe()})()`)
+          if (typeof value !== 'object' || value === null) return undefined
+          const read = value as Record<string, unknown>
+          if (typeof read['url'] !== 'string' || typeof read['title'] !== 'string'
+            || typeof read['origin'] !== 'number') return undefined
+          return { url: read['url'], title: read['title'], origin: read['origin'] }
+        } catch {
+          // A page that cannot answer yet — one that is being replaced — is
+          // asked again until the budget runs out, not believed to have none.
+          return undefined
+        }
+      })()
+      if (said !== undefined) return said
+      if (Date.now() >= deadline) break
+      await sleep(50)
+    }
+    return { url: page.url(), title: '', origin: 0 }
   }
 
   /**
@@ -2438,10 +3026,23 @@ export class SessionBrowser {
       changes = record.changes
       omitted = record.omitted
     }
+    // One bounded beat before the state is read: the browser says a tab it just
+    // opened exists a moment after the press returns, and an adoption that is
+    // already running has to finish before this report can describe the world
+    // the caller's next call will land in (measured 2026-09-29: two of three
+    // `window.open` clicks reported the page they left behind).
+    await sleep(ADOPTION_GRACE_MS)
+    await Promise.race([this.adoption.catch(() => {}), sleep(SETTLE_NAVIGATION_MS)])
     const after = await this.stateOf(this.page ?? started)
     const changed: string[] = []
     if (after.url !== before.url) changed.push('url')
     if (after.title !== before.title) changed.push('title')
+    // The document this read describes and the one the action began on are
+    // different documents whenever their instants differ — a form POST that
+    // answers with the same page replaces the document and changes neither the
+    // address nor the title, and "the page did not change" is the one answer a
+    // model cannot act on correctly there.
+    if (before.origin !== 0 && after.origin !== 0 && after.origin !== before.origin) changed.push('document')
     if (mutations > 0) changed.push('dom')
     // A dialog is a change of its own: the page may have drawn nothing at all
     // while it asked its question, and "the page did not change" would then be
@@ -2578,7 +3179,10 @@ export class SessionBrowser {
     const quad = quads?.[0]
     if (quad === undefined) throw boxlessError(target)
     const centre = centerOfQuad(quad)
-    return { x: centre.x, y: centre.y, moved: false, outside: false }
+    // The page would not answer the question about itself, so the page's own
+    // verdict on the element being disabled is missing too: a press at the box
+    // is the fallback, and it is not turned into a refusal on a guess.
+    return { x: centre.x, y: centre.y, moved: false, outside: false, disabled: false }
   }
 
   /**
@@ -2751,24 +3355,43 @@ export class SessionBrowser {
   }
 
   /**
-   * Apply viewer input to the active page.
+   * Apply viewer input to the active page, or to the page a viewer names.
+   *
+   * A viewer that names a page drives that page whether or not it is the one
+   * the tools act on: a pane mirrors its page, and its clicks belong there.
+   * Nothing here starts a browser — the page's existence is the proof one is
+   * running, and a pane on a page that is gone must not raise one over it.
    * @param message - the decoded viewer message.
+   * @param targetId - the page's CDP target id, when the viewer names one.
+   * @throws {Error} when a named page does not exist.
    */
-  async input(message: InputMessage): Promise<void> {
-    await this.ensure()
-    const cdp = this.cdpSession()
-    const size = await this.viewportSize(cdp)
-    await dispatchInput(cdp, scaleToViewport(message, size))
+  async input(message: InputMessage, targetId?: string): Promise<void> {
+    if (targetId === undefined) {
+      await this.ensure()
+      const cdp = this.cdpSession()
+      const size = await this.viewportSize(cdp)
+      await dispatchInput(cdp, scaleToViewport(message, size))
+      return
+    }
+    const { cdp, release } = await this.sessionForPage(targetId)
+    try {
+      const size = await this.viewportSize(cdp, targetId)
+      await dispatchInput(cdp, scaleToViewport(message, size))
+    } finally {
+      await release()
+    }
   }
 
   /**
    * The page's CSS viewport, cached briefly so a pointer move is not a round trip.
-   * @param cdp - session attached to the active page.
+   * @param cdp - session attached to the page.
+   * @param key - which page's viewport this is: a target id, or `active` for the un-named one.
    * @returns the viewport in CSS pixels.
    */
-  async viewportSize(cdp: CDPSession): Promise<{ width: number; height: number }> {
+  async viewportSize(cdp: CDPSession, key = 'active'): Promise<{ width: number; height: number }> {
     const now = Date.now()
-    if (this.viewport !== undefined && now - this.viewport.at < VIEWPORT_TTL_MS) return this.viewport.size
+    const cached = this.viewports.get(key)
+    if (cached !== undefined && now - cached.at < VIEWPORT_TTL_MS) return cached.size
     const metrics = await cdp.send('Page.getLayoutMetrics') as {
       cssVisualViewport?: { clientWidth?: number; clientHeight?: number }
     }
@@ -2776,8 +3399,40 @@ export class SessionBrowser {
       width: metrics.cssVisualViewport?.clientWidth ?? 0,
       height: metrics.cssVisualViewport?.clientHeight ?? 0,
     }
-    this.viewport = { at: now, size }
+    this.viewports.set(key, { at: now, size })
     return size
+  }
+
+  /** Forget the viewport a page reported, after the document it came from is gone. */
+  private invalidateViewport(page: Page | undefined): void {
+    this.viewports.delete('active')
+    const targetId = page === undefined ? undefined : this.pageIds.get(page)
+    if (targetId !== undefined) this.viewports.delete(targetId)
+  }
+
+  /**
+   * The CDP session to drive one named page with: its mirror's, or a temporary
+   * one that is released after use.
+   *
+   * A mirror exists while someone watches the page, and its session is already
+   * attached to it; a page nobody watches still answers input, through a
+   * session that lives for the call.
+   * @param targetId - the page's CDP target id.
+   */
+  private async sessionForPage(targetId: string): Promise<{
+    cdp: CDPSession
+    release: () => Promise<void>
+  }> {
+    const mirror = this.mirrors.get(targetId)
+    if (mirror !== undefined) return { cdp: mirror.cdp, release: async () => {} }
+    const page = this.pageByTargetId(targetId)
+    if (page === undefined) {
+      throw new Error(`dsh-browser: session ${this.sessionId} has no page ${targetId}`)
+    }
+    const context = this.session?.context
+    if (context === undefined) throw new Error(this.unusable())
+    const cdp = await context.newCDPSession(page)
+    return { cdp, release: () => cdp.detach().catch(() => {}) }
   }
 
   /**
@@ -2791,11 +3446,25 @@ export class SessionBrowser {
    * The focused control's own selection comes first: in a text field the
    * document selection is usually collapsed, and the field's range is what a
    * copy would take there.
+   * @param targetId - the page's CDP target id, when the viewer names one.
    * @returns the selected text, empty when nothing is selected.
    */
-  async selectionText(): Promise<string> {
+  async selectionText(targetId?: string): Promise<string> {
+    if (targetId !== undefined) {
+      const { cdp, release } = await this.sessionForPage(targetId)
+      try {
+        return await this.selectionOf(cdp)
+      } finally {
+        await release()
+      }
+    }
     await this.ensure()
-    const text = await this.evaluateIn(this.cdpSession(), `(() => {
+    return await this.selectionOf(this.cdpSession())
+  }
+
+  /** Read the selection on one page's session. */
+  private async selectionOf(cdp: CDPSession): Promise<string> {
+    const text = await this.evaluateIn(cdp, `(() => {
       const active = document.activeElement
       if (active !== null && typeof active.selectionStart === 'number'
         && active.selectionStart !== active.selectionEnd) {
@@ -2806,11 +3475,72 @@ export class SessionBrowser {
     return typeof text === 'string' ? text : ''
   }
 
+  /**
+   * Close one page of this browser, by the CDP target id a sidebar tab names.
+   *
+   * Closing the last page is closing the browser: Chrome exits when its last
+   * tab goes, so the close is the deliberate stop — a viewer coming back must
+   * not start a new one over it — and not a page close that a fresh blank page
+   * would paper over. A page that is already gone has nothing to close, and in
+   * particular this is not a reason to stop a browser that may outlive it.
+   * @param targetId - the page's CDP target id, as the tab list reports it.
+   */
+  async closePage(targetId: string): Promise<void> {
+    const page = this.pageByTargetId(targetId)
+    if (page === undefined) return
+    const remaining = this.session?.context.pages() ?? []
+    if (remaining.length <= 1) {
+      await this.stop()
+      return
+    }
+    await page.close().catch((error: unknown) => {
+      this.logger.warn(error instanceof Error ? error : new Error(String(error)))
+    })
+    this.publish()
+  }
+
+  /**
+   * Open an address in one named page — the pane's own address bar, which acts
+   * on the page it mirrors, not on whichever page the tools act on.
+   * @param targetId - the page's CDP target id.
+   * @param url - absolute address to load.
+   * @throws {Error} when no page by that id exists.
+   */
+  async navigatePage(targetId: string, url: string): Promise<void> {
+    const page = this.pageByTargetId(targetId)
+    if (page === undefined) {
+      throw new Error(`dsh-browser: session ${this.sessionId} has no page ${targetId}`)
+    }
+    this.invalidateViewport(page)
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    this.publish()
+  }
+
+  /**
+   * Reload one named page, the same way: the pane's own control, on its own page.
+   * @param targetId - the page's CDP target id.
+   * @throws {Error} when no page by that id exists.
+   */
+  async reloadPage(targetId: string): Promise<void> {
+    const page = this.pageByTargetId(targetId)
+    if (page === undefined) {
+      throw new Error(`dsh-browser: session ${this.sessionId} has no page ${targetId}`)
+    }
+    this.invalidateViewport(page)
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 })
+    this.publish()
+  }
+
   /** Stop the browser and release its port and temporary profile. */
   async close(): Promise<void> {
     this.closing = true
     try {
       await this.closeStream()
+      for (const targetId of [...this.mirrors.keys()]) this.dropMirror(targetId)
+      this.pageIds.clear()
+      this.titles.clear()
+      void this.browserCdp?.detach().catch(() => {})
+      this.browserCdp = undefined
       const session = this.session
       this.session = undefined
       this.page = undefined
@@ -2923,9 +3653,25 @@ export class SessionBrowser {
    * A page carries its own CDP session, so following one means attaching to it
    * and restarting the mirror from the new attachment; the old attachment is
    * detached afterwards, once nothing is reading it.
+   *
+   * The promise is kept on the session (`adoption`) so a report that is being
+   * written while a tab opens can wait for the world it describes to exist:
+   * measured 2026-09-29, two of three `window.open` clicks read their state
+   * before the adoption finished and described the page they left behind.
    * @param page - the page to adopt.
+   * @returns when the page is the one tools and mirror act on.
    */
-  private async adopt(page: Page): Promise<void> {
+  private adopt(page: Page): Promise<void> {
+    const running = this.adopting(page)
+    this.adoption = running
+    return running
+  }
+
+  /** The adoption running right now, if one is; resolved when none is. */
+  private adoption: Promise<void> = Promise.resolve()
+
+  /** Do the work of `adopt`, which keeps it as the session's current adoption. */
+  private async adopting(page: Page): Promise<void> {
     const previous = this.cdp
     this.page = page
     // A ref names a DOM node on one page; the next page may have neither the
@@ -2946,13 +3692,17 @@ export class SessionBrowser {
     // asks its question is still a question the model asked for by clicking.
     page.on('dialog', (dialog) => { this.answerDialog(dialog) })
     page.on('close', () => {
+      this.forgetPage(page)
       if (this.page !== page) { this.publish(); return }
       void this.moveToSurvivingPage()
     })
     const cdp = await this.session?.context.newCDPSession(page)
     if (cdp === undefined) return
-    this.viewport = undefined
+    // `active` names a different page from here on, so what the old one
+    // reported about its own size is not this page's answer.
+    this.viewports.delete('active')
     this.cdp = cdp
+    await this.namePage(cdp, page)
     await this.listenToConsole(cdp)
     if (this.config.stealth) await hideHeadlessUserAgent(cdp, page)
     if (this.stream !== undefined) {
@@ -2973,6 +3723,43 @@ export class SessionBrowser {
     } catch (error) {
       this.logger.warn(error instanceof Error ? error : new Error(String(error)))
     }
+  }
+
+  /**
+   * Learn a page's CDP target id — and with it the title it reported — from its
+   * own session.
+   *
+   * One call, on the session this class just attached: `Target.getTargetInfo`
+   * with no argument answers the target that session is attached to, so the id
+   * cannot be confused with another page's even when two pages sit on the same
+   * address. A page that answers nothing is reported without an id, and the
+   * sidebar can only mirror pages it can name.
+   * @param cdp - the page's own CDP session.
+   * @param page - the page being named.
+   */
+  private async namePage(cdp: CDPSession, page: Page): Promise<void> {
+    try {
+      const answer = await cdp.send('Target.getTargetInfo') as {
+        targetInfo?: { targetId?: unknown; title?: unknown }
+      }
+      const targetId = answer.targetInfo?.targetId
+      if (typeof targetId !== 'string' || targetId === '') return
+      this.pageIds.set(page, targetId)
+      const title = answer.targetInfo?.title
+      if (typeof title === 'string') this.titles.set(targetId, title)
+      this.publish()
+    } catch {
+      // A refused identity call is not an adoption failure: the page works, it
+      // just cannot be named yet, and the next publish carries what is known.
+    }
+  }
+
+  /** Drop everything tracked about a page that is gone. */
+  private forgetPage(page: Page): void {
+    const targetId = this.pageIds.get(page)
+    this.pageIds.delete(page)
+    if (targetId !== undefined) this.titles.delete(targetId)
+    this.dropMirror(targetId)
   }
 
   /** Attach the screencast for the current viewers, starting the browser if needed. */
@@ -3022,6 +3809,11 @@ export class SessionBrowser {
   /** Drop everything the dead browser owned, keeping the viewers subscribed. */
   private forget(): void {
     void this.closeStream()
+    for (const targetId of [...this.mirrors.keys()]) this.dropMirror(targetId)
+    this.pageIds.clear()
+    this.titles.clear()
+    void this.browserCdp?.detach().catch(() => {})
+    this.browserCdp = undefined
     this.session = undefined
     this.page = undefined
     this.cdp = undefined
