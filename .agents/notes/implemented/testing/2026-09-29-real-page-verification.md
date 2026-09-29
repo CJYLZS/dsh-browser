@@ -23,7 +23,7 @@ Status: implemented
 ### 本轮用到的站点（下次从这里挑）
 
 - **<https://the-internet.herokuapp.com/>** —— 44 个互不相同的例子：表单与 basic auth、dropdown / checkbox、`<dialog>` 式的 entry ad、动态加载与动态控件、iframe 与嵌套帧、**shadow DOM**、无限滚动、损坏图片与 onload 异常、Large & Deep DOM（54 层、2807 个深层节点）、可排序表格、WYSIWYG 编辑器。全部静态、无需登录。
-- **<https://testing.qaautomationlabs.com/>** —— 18 个组件，含 shadow DOM、iframe、拖拽、文件上传下载、web tables、alerts，无需登录。
+- **<https://testing.qaautomationlabs.com/>** —— 15 个组件（checkbox / radio / dropdown / list box / slider / form / web table / **iFrame** / **shadow DOM** / window-popup-modal / **drag & drop** / **JavaScript alert** / notifications / 文件上传与下载），外加一个"challenge mode"（给每次加载加随机延迟，正好量显式等待），无需登录。
 - **<https://qaplayground.com/>** —— 22+ 组件（影子 DOM、iframe、拖拽、动态等待、面试式靶子）。
 - 真实站点（github、文档站、Shopify 之类的商品页）留着当"内容由别处决定"的那一面：适合看快照规模、控制台噪音与真实点击路径，不适合当回归判据。
 
@@ -60,6 +60,54 @@ Status: implemented
 
 这条复验也顺手确认了 `browser_type` 的 `clear` 默认是 `true`：连着两次输入是**替换**关系（第二次的 `!` 让值从 `hello` 变成 `!`），要追加得显式 `clear: false`——这是既定行为，不是缺陷。
 
+### 组件站点那一遍：<https://testing.qaautomationlabs.com/>
+
+15 个组件 + 一个"challenge mode"（随机加载延迟）的练习站，无需登录。这一遍走的都是 the-internet 覆盖薄的地方，结论如下（其中三处是缺陷，见后台两节）：
+
+- **三种对话框全对**（`/javaScript-alert.php`）：不给 `dialog` 时 alert 被 dismiss 且回报 `changed: dom, dialog` 与对话框原话；`dialog: "accept"` 让 confirm 被接受，页面自己把结果写成 `You clicked OK on confirm button.`；prompt 带 `dialogText: "hello from dsh"` 被接受，页面回显 `You entered: hello from dsh`——**帧外第三方证据**，不是我们的自述。
+- **弹窗里的点击穿得过整页遮罩**（`/window-popup-modal.php`）：点开 Bootstrap 弹窗后 `body` 变成 `sidebar-mini modal-open`、`modal-backdrop fade show` 出现，共 9 条变化；再点弹窗里的 `Close` 时遮罩盖着全页，落点判定没有误判（没有要 `force`），关闭后 8 条变化如实报到，含 `aria-modal: true → (none)` 与 `role: dialog → (none)`。
+- **同一对同名按钮在弹窗里也一样**：弹窗里两个 `Close` 只差位置、名字与描述完全相同，`text: "Close"` 命中 **3** 个——第三个是那段代码片段（它的 StaticText 里含 `Close`），子串匹配如实列出；两个 Close 的祖先都只写到 RootWebArea，因为那个 `dialog` 自身没有无障碍名（trail 只写有名字的祖先）。
+- **ref 点击 + 导航回报正常**：列表页按 ref 点链接 → `changed: url, title` 两条都对（GET 那一类；POST 那一类见下）。
+- **帧内控件不可达**（`/iframe.php`）：见下。
+
+### 新发现：子帧的内容不在快照里，而 Chrome 的整页树本来就不含它
+
+`testing.qaautomationlabs.com/iframe.php` 上有两个**同源**子帧（`iframe1.php` / `iframe2.php`，`contentDocument` 可达，帧里各有一句 `I am iFrame 1` 与一个 `button "CLick Me"`）。我们的快照只有两个节点：
+
+```
+- Iframe "iframe 1" [ref=…]
+- Iframe "iframe 2" [ref=…]
+```
+
+`target=<那个 ref>` 也展不开任何东西。把 AX 探针挂到端口 9333 上量原始树（`.prove/ax-probe/tree.json`），两个 `Iframe` 节点的 `childIds` 都是 `[]`——**Chrome 的整页 `Accessibility.getFullAXTree` 不把子帧的树并进来**，每个帧要按 `frameId` 单独取。所以这是 Chrome 的形状，不是我们的过滤规则吃掉了它。
+
+后果是帧内控件今天完全不可达：
+
+- 没有 ref（快照里没有那些节点）。
+- `selector` 也不行：`iframe[name=iframe1] button` → `no element matches selector …`，因为 `DOM.querySelector` 只在主文档里找。而这条错误接着建议"call browser_snapshot and act on a ref from its result"——在帧这一情形里是**死路**，那个 ref 永远不会出现。
+- 唯一的路是 `browser_evaluate` 走同源 `contentDocument`，那是不可信事件，正是 `browser_click` 存在的理由。
+
+修法是功能级的：按 `Page.getFrameTree` 给每个子帧各取一次树（同进程帧用 `frameId`，OOPIF 要附加 `Target`），把子树接到 `Iframe` 节点下面，ref 也要发给帧内节点，`selector` 同样要能下到帧里。不在本轮修复范围。
+
+### 新发现：替换文档的点击把状态读在导航提交之前
+
+`/login` 上提交表单（POST `/authenticate` → 302 回同一地址）连点两次，两次的回报都是：
+
+```
+Clicked button " Login".
+Page: https://the-internet.herokuapp.com/login — "Loading https://the-internet.herokuapp.com/login"
+The page changed: title.
+```
+
+三处都不对：那个标题**页面从来没有过**（提交前后 `document.title` 都是 `The Internet`，the-internet 所有页面共用这一个标题），`changed: ["title"]` 于是声称了一次并未发生的标题变化，而真正发生的事——整份文档被换掉（`#flash` 随后读出 `Your username is invalid!`，说明表单确实提交了）——一条都没报（mutation 数为 0，因为观察者装在被换掉的那份文档上）。对照组：点 `Form Authentication` 链接（GET，同源）回报的标题就是对的，`changed` 只有 `url`。
+
+根因有两层，都是"读得太早"：
+
+- **`page.title()` 会自己编一个标题。** Playwright 的 `_title()` 在页面答不上来（导航进行中、求值没法进行）时走 `catch` 分支，返回 `` `Loading ${pendingDocument()?.request?.url()}` ``（`playwright-core/lib/coreBundle.js` 里 `async _title()`，本机为 24472 行附近）。所以这个字符串的含义是"读不到"，不是"页面叫这个"。
+- **`settle()` 等的不是"新文档提交"。** `await started.waitForLoadState('domcontentloaded')` 对**已经**处于该状态的旧文档是空操作，于是后面整段状态（url + title）都读在新文档提交之前；GET 那次恰好读在了提交之后，所以看起来正常。
+
+修法要落在 settle 那一层（装一个导航观察者，等新文档提交之后再读状态，并把"文档被替换"本身当作一次变化报出来），那是本仓库最敏感的一处，不在本轮修复范围。
+
 ## Alternatives considered
 
 **只跑 `pnpm test` 与回归就算验证完。** 否决——这正是三个缺口漏过去的方式：单测用的是假 CDP 与假 store，回归只驱动 `SessionBrowser`，两者都看不到"工具层的结果要过 harness 的 `output.schema` 校验"这一层，也看不到 Chrome 对某个具体控件会怎么答。
@@ -75,7 +123,8 @@ Status: implemented
 - 验证有了一份可复用的清单（站点 + 每个工具看什么），下一轮照做即可；成本是整轮约四十次工具调用加一次回归。
 - 三个缺口的共同形状值得记住：**假件的形状决定测试能看见什么**。假 CDP 的 `DOM.focus` 永远成功、假 store 只答声明过的字段，于是"禁用"与"多字段"这两个真实形状在测试里不存在。
 - **`inline` 这条链路的闭环依赖一次插件重载**：DSH 在加载插件时读入 `lib/index.js`，`pnpm run build` 只更新磁盘上的产物，所以界面上仍跑旧模块时同一个调用会继续报校验错误——那不是修复没生效，是模块没被换掉。2026-09-29 重载后复验通过（见上一节）。下次改 host 半边时按同一顺序：改源码 → 跑测试 → `pnpm run build` → 重载/重启 → 用工具面复验一次。
-- 仍然欠着的真机项收窄成两条：关联 `<label>`（而不是 `placeholder`）计算无障碍名，以及 `role`+`name` 组合在真实页面上的消歧（这一轮走的是 `text` 与 `selector`）。
+- 两条欠账在同一次复验里销掉：`/login` 的 `Username` / `Password` 无障碍名确实来自关联 `<label for>`（页面里既没有 `placeholder` 也没有 `aria-label`，浏览器自己的 `input.labels` 也答同一个词）；`/login` 上 `text: "Login"` 同时命中 `heading "Login Page"` 与 `button " Login"` 而被拒，补上 `role: "button"` 就命中按钮——`role`+`name` 的消歧在真实页面上成立。
+- 这一轮之前的三条结论都被复验为真，但**复验本身又找出三条新的**：子帧内容不在快照里且 ref / `selector` 都到不了（`Iframe` 节点在原始树里 `childIds: []`，是 Chrome 的整页树不含子帧，属功能级改动）；替换文档的点击会报出一个页面从未有过的标题（`page.title()` 在答不上来时自编 `Loading <url>`）；以及"没有匹配的 selector"这条错误在页面有子帧时给的建议是死路。一次真机过一遍的价值不在"确认已修的"，而在这种只会在真实导航时序与真实帧结构里出现的缺陷。
 
 ## Related
 
