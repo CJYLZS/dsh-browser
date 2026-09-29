@@ -57,7 +57,7 @@ import type {
   WaitCondition,
 } from '../browser/session-browser.ts'
 import { preview, shouldSpill, spillStoreOf, writeText, type SpillStore } from './spill.ts'
-import { assertImageRoute, attachmentStoreOf, type ImageRef } from './attach.ts'
+import { assertImageRoute, attachmentStoreOf, imageRefOf, type ImageRef } from './attach.ts'
 
 /** Directory screenshots are written to; inside the OS temp area, so it needs no cleanup contract. */
 const SHOT_DIR = join(tmpdir(), 'dsh-browser-shots')
@@ -622,7 +622,14 @@ const ELEMENT_SCHEMA = {
   },
 } as const
 
-/** The reported shape of an image the result carries as well as writes. */
+/**
+ * The reported shape of an image the result carries as well as writes.
+ *
+ * Exactly the fields {@link imageRefOf} reports, which is what the harness
+ * validates the tool result against: a property the store answers with and this
+ * does not name fails the whole result, so the two are one fact and change
+ * together.
+ */
 const IMAGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -632,6 +639,15 @@ const IMAGE_SCHEMA = {
     bytes: { type: 'integer', required: true },
     width: { type: 'integer', required: true },
     height: { type: 'integer', required: true },
+    name: { type: 'string' },
+    originalDimensions: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        width: { type: 'integer', required: true },
+        height: { type: 'integer', required: true },
+      },
+    },
   },
 } as const
 
@@ -1262,9 +1278,10 @@ export function registerTools(ctx: Context, pool: BrowserPool): void {
       const path = join(SHOT_DIR, `${name}.jpg`)
       await writeFile(path, shot.jpeg)
       const attachments = args.inline === true ? attachmentStoreOf(ctx) : undefined
-      const image = attachments === undefined
+      const saved = attachments === undefined
         ? undefined
         : await attachments.saveImage({ data: shot.jpeg, mediaType: 'image/jpeg', name: `${name}.jpg` })
+      const image = saved === undefined ? undefined : imageRefOf(saved)
       const dialogs = browser.takeDialogs()
       return {
         path,

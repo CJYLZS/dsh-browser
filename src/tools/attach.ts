@@ -34,6 +34,38 @@ export interface ImageRef {
   readonly height: number
   /** Optional display name. */
   readonly name?: string
+  /** Dimensions before storage normalized the image; present only when it reduced them. */
+  readonly originalDimensions?: { readonly width: number; readonly height: number }
+}
+
+/**
+ * One image reference as this plugin reports it.
+ *
+ * The store's record is copied field by field rather than passed through. The
+ * declared output schema refuses any property it does not name, so a store that
+ * answers with one field more than this plugin reports turns a capture that
+ * already happened into an invalid tool result: measured 2026-09-29 in this GUI,
+ * the real store answers with `name` (`ImageAttachmentRef` carries `name?` and
+ * `originalDimensions?`) while this plugin declared five fields, and the
+ * screenshot came back as `"value.image.name" is not a declared property`. The
+ * harness's own `read_image` maps its reference the same way, for the same
+ * reason: what this plugin reports is this plugin's decision, not the store's
+ * record shape.
+ * @param saved - the reference the attachment service returned.
+ * @returns the reference narrowed to the fields this plugin declares.
+ */
+export function imageRefOf(saved: ImageRef): ImageRef {
+  return {
+    attachmentId: saved.attachmentId,
+    mediaType: saved.mediaType,
+    bytes: saved.bytes,
+    width: saved.width,
+    height: saved.height,
+    ...saved.name === undefined ? {} : { name: saved.name },
+    ...saved.originalDimensions === undefined
+      ? {}
+      : { originalDimensions: { ...saved.originalDimensions } },
+  }
 }
 
 /**

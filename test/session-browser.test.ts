@@ -259,6 +259,36 @@ test('typing into an element the page never focused is refused', async () => {
   assert.deepEqual(page.cdp.method('Input.insertText'), [])
 })
 
+test('typing into an element the page will not focus is refused in this tool\'s words, not the protocol\'s', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // Measured 2026-09-29 on the-internet's dynamic-controls page: a disabled
+  // input makes `DOM.focus` itself reject — `Element is not focusable` — so the
+  // page's own answer was never asked for and the caller got
+  // `cdpSession.send: Protocol error (DOM.focus): Element is not focusable`,
+  // which names neither the element nor the reason nor a next move.
+  page.cdp.failWith('DOM.focus', 'cdpSession.send: Protocol error (DOM.focus): Element is not focusable')
+  page.cdp.answers.set('Runtime.callFunctionOn', {
+    result: { value: { accepts: false, why: 'it is disabled' } },
+  })
+  await assert.rejects(() => browser.type('e1', 'x'), /textbox "Email" would not take the text because it is disabled/)
+  assert.deepEqual(page.cdp.method('Input.insertText'), [], 'text went into an element the page had refused to focus')
+})
+
+test('a page that will not focus an element and cannot say why is still refused by name', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.failWith('DOM.focus', 'cdpSession.send: Protocol error (DOM.focus): Element is not focusable')
+  // The default answer here is the shape a press probe reads, which says nothing
+  // about typing: the page has no reason to give, so the protocol's own words are
+  // the reason, and the refusal still has to name the element and the way out.
+  await assert.rejects(
+    () => browser.type('e1', 'x'),
+    /would not focus textbox "Email" \(Element is not focusable\); nothing was typed/,
+  )
+  assert.deepEqual(page.cdp.method('Input.insertText'), [])
+})
+
 test('a page that answers nothing about typing does not block the text', async () => {
   // The page is asked, not obeyed: an answer this code cannot read — the press
   // answer the fake hands out by default is exactly that — leaves the old
@@ -1250,7 +1280,30 @@ test('a selector that matches several elements refuses and lists them', async ()
   const { browser, page } = await started()
   page.cdp.answers.set('Accessibility.getFullAXTree', AMBIGUOUS_TREE)
   answerSelectors(page, { button: [61, 62] })
-  await assert.rejects(() => browser.click({ selector: 'button' }), /selector "button" matches 2 elements/)
+  await assert.rejects(() => browser.click({ selector: 'button' }), (error: Error) => {
+    assert.match(error.message, /selector "button" matches 2 elements/)
+    // Measured 2026-09-29 on the-internet's add/remove page: the same two
+    // buttons read as `in RootWebArea "The Internet"` through `text` and as
+    // `no named ancestor` through `selector`, because the selector path never
+    // asked the tree where its matches sit. The list is the whole reason the
+    // refusal is usable, so the same fact has to reach it either way.
+    assert.match(error.message, /region "Running"/)
+    assert.match(error.message, /region "Idle"/)
+    return true
+  })
+  assert.deepEqual(pointerCalls(page), [])
+})
+
+test('a selector whose matches the tree does not describe says that, rather than claiming they have no ancestor', async () => {
+  const { browser, page } = await started()
+  // Two elements the accessibility tree has no node for: a selector reaches
+  // them, and neither "no named ancestor" nor an invented trail is true.
+  answerSelectors(page, { '.row': [91, 92] })
+  await assert.rejects(() => browser.click({ selector: '.row' }), (error: Error) => {
+    assert.match(error.message, /not described by the accessibility tree/)
+    assert.doesNotMatch(error.message, /no named ancestor/)
+    return true
+  })
   assert.deepEqual(pointerCalls(page), [])
 })
 

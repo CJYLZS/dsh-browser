@@ -43,6 +43,8 @@ Status: implemented
 
 形状的正确性不是猜的：`shotBlocks()` 的返回类型被 harness 自己的 `ContentBlock` 检查过（结构化声明的 `ImageRef` 一字不改地被接受），也就是说这条"不 import 包"的路在类型层也是通的。
 
+**但类型层通过不等于结果能过校验：附出去的引用必须收窄成自己声明的字段。** 工具结果会被 harness 按 `output.schema` 校验，而 store 的记录比我们声明的宽。2026-09-29 在这个 GUI 里量到——真实 store 答的是 `ImageAttachmentRef`（`name?` 与 `originalDimensions?` 都在里面），我们只声明了五个字段且 `additionalProperties: false`，于是整个工具结果被拒：`tool "browser_screenshot" returned invalid output: "value.image.name" is not a declared property (additionalProperties: false)`，字节**已经写进 store**，模型拿到的却是一个错误——而错误里那句 `value.image.name` 是本插件自己的字段名。现在 `imageRefOf()`（[`src/tools/attach.ts`](../../../../src/tools/attach.ts)）逐字段抄成 `attachmentId / mediaType / bytes / width / height / name? / originalDimensions?`，`IMAGE_SCHEMA` 与之逐字对应；harness 自己的 `read_image` 也是这么映射它的 `ImageAttachmentRef` 的（`imageRefFromValue`）。store 以后再多一个字段只会被丢掉，不会把一次已经发生的采集变成失败。
+
 ### 伴生改动：`depth=` 的截断文案给出"页面到第几层"
 
 同一条验收标准里还挂着 09-28 的第 9 条摩擦（09-24 也撞过一次）：`depth=6` 只回报 `311 nodes are deeper than depth=6`，既不说那些节点挂在哪一支，也不说该换哪个数值——"raise depth"因此在实践上是一次一次试。
@@ -83,13 +85,14 @@ Status: implemented
 - 页面坐标对**嵌套帧**的处理是"逐帧 `getBoundingClientRect` + 各层滚动"，与 press 的走法同源；帧边框（`clientLeft/clientTop`）没有算，跨帧元素可能差一两个像素。
 - `inline` 让 `browser_screenshot` 成为唯一会**改变请求形态**的工具：同一次调用在有图像能力的模型上是"文本 + 图片"，在别的模型上是"文本 + 路径"。
 - `lib/` 的构建产物里多了 attachment 的调用点，但**运行时依赖没有增加**：两个服务都是通过 `ctx.get` 拿的。
+- **`inline` 的失败模式是被这一次真机验证改掉的**：字段名的校验失败发生在采集**之后**，所以那时候的代价是"图采了、存了、结果报错"。收窄之后剩下的失败模式只有 store 自己抛错（在采集之后、写文件之前），与门禁拒绝（在采集之前）各占一端。
 
 ## Testing
 
 - `test/session-browser.test.ts`（4 条）：视口截图不传 `clip`；整页截图的 `clip` 是文档尺寸且 `captureBeyondViewport: true`；元素截图的 `clip` 是页内探针给的矩形（向下取整/向上取整）且**没有 `DOM.scrollIntoViewIfNeeded`**；没有盒子的元素被拒绝且一次都没截。
 - `test/tools.test.ts`（3 条）：三种主体的文案、内联与不内联的文案差、`shotBlocks` 在有/无图片时分别是两块与一块。
-- `test/attach.test.ts`（6 条）：两个服务的结构化查找、有图像能力的路由通过、无图像能力/无法解析路由/没有 llm 服务三种拒绝。
-- `test/ptc.test.ts`（3 条，注册表层）：`inline` 会把**采集到的字节**交给 store 并渲染出 image 块；不声明 image 输入的模型被**在截图之前**拒绝（断言 `Page.captureScreenshot` 一次都没发生）；`fullPage` 与元素同时给被拒绝。
+- `test/attach.test.ts`（7 条）：两个服务的结构化查找、有图像能力的路由通过、无图像能力/无法解析路由/没有 llm 服务三种拒绝、以及 `imageRefOf` 把 store 多给的字段丢掉而保留声明过的可选字段。
+- `test/ptc.test.ts`（4 条，注册表层）：`inline` 会把**采集到的字节**交给 store 并渲染出 image 块；一个答得比声明宽的 store（`name`、`originalDimensions`、外加一个我们不报的字段）**不会**让结果被校验拒掉；不声明 image 输入的模型被**在截图之前**拒绝（断言 `Page.captureScreenshot` 一次都没发生）；`fullPage` 与元素同时给被拒绝。
 - 真机：`.prove/clip-space-probe.mjs`（坐标空间）+ `scripts/snapshot-regression.mjs` [25]（6 条：视口/文档尺寸、元素尺寸与名字、滚动位置保持 0、同一元素两次截图字节相同）。
 
 ## Related

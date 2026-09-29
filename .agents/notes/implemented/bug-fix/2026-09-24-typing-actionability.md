@@ -17,12 +17,15 @@ Status: implemented
 - 错误形如 `dsh-browser: textbox "locked" would not take the text because it is read-only; nothing was typed, so take a new snapshot and check the element`，并且**什么都没派发**：`Input.insertText` 一次都不会发出。
 - **页面答不上来就不拦**：答案读不出这个代码能用的字段（节点已被替换、`DOM.resolveNode` 失败）时按原行为继续。这是与点击回退到 CDP quad 同一种取舍——探针是"问页面一个问题"，不是页面必须满足的前置条件。
 - `browser_type` **不加 `force` 参数**：点击的 `force` 关掉的是"Receives Events"（遮挡有时是真的可以忽略），而这里的拒绝是"文字根本进不去"，放行只会把假成功请回来。工具面继续是 6 个，能力做成参数而不是新工具。
+- **聚焦被页面拒绝时，理由来自元素自己**（2026-09-29 真机补上）。禁用的输入框会让 `DOM.focus` **本身**失败，于是"问页面收不收文本"这件事根本没发生过：调用方拿到的是传输层的原话 `cdpSession.send: Protocol error (DOM.focus): Element is not focusable`——不点名元素、不给理由、不说下一步，而 `it is disabled` 这条拒绝理由因此在真机上**从未被走到过**（单测里假 CDP 让 `DOM.focus` 成功，所以只有真机能发现）。现在聚焦失败**不中断**：探针照旧在元素上跑，答案由元素自己的状态给出；页面给不出理由时，才用这条协议原话（去掉传输层包装）拼成 `the page would not focus textbox "switched off" (Element is not focusable); nothing was typed, …`。探针顺序随之改为**先问状态、再问焦点落没落上**——问的是"焦点所在控件"（元素本身或其后代）的状态，`accepts: true` 仍蕴含焦点确实落在那里。
 
 ## Testing
 
 - `test/session-browser.test.ts` 新增三条：只读字段被指名拒绝且 `Input.insertText` 为空；焦点没落上的元素被拒绝；页面答不上来时文本照旧发出（用假启动器默认那份"点击答案"来建模"答不上来"）。
+- 2026-09-29 再加两条：`DOM.focus` 按真机的拼法失败（`Element is not focusable`）时，页面答 `it is disabled` → 指名拒绝且 `Input.insertText` 为空；页面答不出来 → 拒绝里仍带元素名、`Element is not focusable` 与"什么都没输入"。
 - `pnpm test` **195/195，exit 0**（从 192 涨到 195）。
 - `pnpm run regression` **39/39，exit 0**，新增 [18]：真实 Chrome 上 `data:text/html` fixture，只读框回报 `dsh-browser: textbox "locked" would not take the text because it is read-only…`、读回 `""`，同一个页面上的可编辑框仍拿到 `"hello" into textbox "free"`。
+- [18] 在 2026-09-29 扩成三个框（只读 / 禁用 / 正常）：禁用框在**真机**上回报 `dsh-browser: textbox "switched off" would not take the text because it is disabled; nothing was typed, …`，值读回 `""`，同一个页面上的可编辑框照旧拿到文本。三个框的名字都由 `placeholder` 计算而来，所以这条也顺带在真页面上确认了无障碍名的来源。
 
 ## Alternatives considered
 

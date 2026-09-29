@@ -19,6 +19,7 @@ Status: implemented
 - **在动作那一刻解析**：`name`/`text` 是大小写不敏感的子串，匹配读**无障碍树**（`Accessibility.getFullAXTree`），所以"定位能匹配到的"恰好就是"快照会打印出来的"。`selector` 交给 DOM（`DOM.querySelectorAll` + `DOM.describeNode`）再按 `backendDOMNodeId` 映回树，因此能触达无障碍树没描述的元素。
 - **命中 0 个**：立即报错，点名调用方写的那句定位，并指向 `browser_snapshot`。选择器本身被页面拒绝时**另报**（"页面拒绝了 selector"），不混成"没有元素匹配"——后者会让调用方去找另一个元素，而错的是问题本身。
 - **命中多个**：**拒绝**，并把每个候选连同它**最近的具名祖先**列出来（`button "Open" — in dialog "Settings" < RootWebArea "Dashboard"`）。拒绝才是这个功能的价值所在：挑一个会点到调用方没指名的元素，报 0 个会把非空页面说成空的。名单是让拒绝可用的那一半——两个同名控件之间，祖先名通常是唯一能把它们分开的事实。祖先链只取最近的三个具名者，无名的包装层跳过而不是印成 `generic ""`；确实没有具名祖先的候选项写 `no named ancestor`。
+- **祖先链有三种状态，不是两种**（2026-09-29 真机补上）：**有**祖先名 → `in region "Running" < RootWebArea …`；树描述了它而祖先都没名字 → `no named ancestor`；**树根本没描述这个元素**（`selector` 能触达、无障碍树看不见）→ `not described by the accessibility tree`。第三种是这次真机发现补上的：`selector` 走的是 DOM，早先的实现在这条路上直接填了空数组，于是同一对元素用 `text` 问是 `in RootWebArea "The Internet"`、用 `selector` 问却是 `no named ancestor`——把"没查过"说成了"页面没说过"。修法是把树的那次查找复用过来（`entryInTree()`，`src/browser/locate.ts`），树不描述时才让 `trail` **缺席**，而缺席与空数组在拒绝里各有各的说法。
 - **ref 与定位是两套名字空间**：`ElementTarget = string | Locator`，`ref` 与任一形态同时出现会被拒绝。
 - **动作失败后的自愈沿用原来的规则**：元素在动作中途被替换时，ref 走既有的"按 role+name 找回"，定位则**重新解析一次**，且只在恰好一个候选时才重试——与解析时的拒绝同一个取舍。
 - **两个工具的元素参数完全一样**：`ref` / `role` / `name` / `text` / `selector`，其中 `role`+`name` 是一种形态、`text` 与 `selector` 各自是一种。这是参照系本身的形状——Playwright 的定位轴在终点动作之间共享（`getByRole(…).click()` / `.fill(value)`），"一套定位词汇，施加到任意动作"。所以 `text` 在两个工具上都是定位。
@@ -69,7 +70,7 @@ Status: implemented
 - **无障碍树没描述的元素只能用 `selector` 触达**，且它的候选名只能是标签（`div`），因为确实没有别的名字可给。
 - **改名有一个已知的迁移代价**：按 MCP 扁平 `browser_type(text: …)` 习惯写 `{text: "x"}`（想输入当前焦点）的调用方，现在会被当成定位搜索，得到 `no element matches text "x"`。失败是响亮的、可捕获的，而且错误信息里把 `text` 当定位这件事会教它改；`{ref, text}` 那种写法则直接被拒绝并指名 `value`。代价是一次往返，不是静默写错地方。
 - **`role`/`name` 只做大小写不敏感的子串匹配，还不收 `/regex/`**：参照系的 `TextMatcher` 收，我们的 `parseQuery` 也已经有这个能力，所以这是记在案上的后续项。
-- 真机验证仍是欠的：本轮的断言都在 `test/`（假启动器 + 真注册表），`scripts/snapshot-regression.mjs` 的固定任务集还没有一条用定位跑的动作；"关联 label / placeholder 会进无障碍名"这条也还没在真页面上确认过。
+- **真机这一格已经补上了**（2026-09-29）：`scripts/snapshot-regression.mjs` 新增 [26]，在一个真实 Chrome 里用 `text` 与 `selector` 各问一次同一对同名按钮，两种问法都拒绝并列出 `region "Running"` / `region "Idle"`，且都没有按下任何东西；[18] 的三个输入框名字（`locked` / `switched off` / `free`）全部来自 **placeholder**，所以"placeholder 会进无障碍名"这条也在真页面上确认了。还没确认的只剩**关联 `<label>`**（fixture 用的是 placeholder）与 `find=` 之外的 `role`+`name` 组合。
 
 ## Related
 

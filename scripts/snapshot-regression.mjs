@@ -92,17 +92,38 @@ const SCROLLED_FIXTURE = `<!doctype html><meta charset="utf-8"><title>scrolled f
 <a id="deep" href="#pressed" onclick="globalThis.__pressedY = Math.round(event.clientY); this.textContent = 'Pressed at ' + globalThis.__pressedY">Deep link</a>`
 
 /**
- * A page with one field that cannot take text and one that can.
+ * A page with fields that cannot take text and one that can.
  *
  * A read-only input still takes the focus, so `Input.insertText` goes out and
  * inserts nothing at all — measured 2026-09-24 in real Chrome, where the report
- * said the text had been typed. Only the field's own value says whether it
- * landed, which is why both fields are read back rather than trusted.
+ * said the text had been typed. A disabled input is the other shape: it refuses
+ * the focus itself, measured 2026-09-29 on the-internet's dynamic-controls page,
+ * where `DOM.focus` rejected with `Element is not focusable` and the caller got
+ * the transport's sentence instead of the page's reason. Only the field's own
+ * value says whether anything landed, which is why every field is read back
+ * rather than trusted.
  */
 const TYPING_FIXTURE = `<!doctype html><meta charset="utf-8"><title>typing fixture</title>
 <h1>Typing fixture</h1>
 <input id="fixed" placeholder="locked" readonly>
+<input id="off" placeholder="switched off" disabled>
 <input id="free" placeholder="free">`
+
+/**
+ * A page with one control name used twice, in two places only their ancestors
+ * tell apart.
+ *
+ * This is the shape a ref cannot express and a locator has to refuse — and the
+ * refusal is only usable if it says which candidate is which. Measured
+ * 2026-09-29 on the-internet's add/remove page, where two "Delete" buttons read
+ * as `in RootWebArea "The Internet"` through `text` and as `no named ancestor`
+ * through `selector`: the selector path never asked the tree where its matches
+ * sat, so the list that exists to tell them apart said nothing.
+ */
+const AMBIGUOUS_FIXTURE = `<!doctype html><meta charset="utf-8"><title>ambiguous fixture</title>
+<h1>Ambiguous fixture</h1>
+<div role="region" aria-label="Running"><button onclick="globalThis.__clicked = true">Stop</button></div>
+<div role="region" aria-label="Idle"><button onclick="globalThis.__clicked = true">Stop</button></div>`
 
 /**
  * A page that reacts to one click in three different ways at once.
@@ -576,9 +597,11 @@ async function main() {
     await step('navigate to the typing fixture', 30_000, () => browser.navigate(typingUrl))
     const fields = await step('typing fixture snapshot', 30_000, () => browser.snapshot())
     const locked = refFor(fields.text, /"locked"/)
+    const off = refFor(fields.text, /"switched off"/)
     const free = refFor(fields.text, /"free"/)
-    if (locked === undefined || free === undefined) {
-      check('both fields have a ref to type into', false, `locked ${String(locked)}, free ${String(free)}`)
+    if (locked === undefined || off === undefined || free === undefined) {
+      check('every field has a ref to type into', false,
+        `locked ${String(locked)}, off ${String(off)}, free ${String(free)}`)
     } else {
       const refused = await refusal(() => browser.type(locked, 'nope'))
       const lockedValue = await step('read the read-only field', 30_000,
@@ -587,6 +610,17 @@ async function main() {
         /would not take the text because it is read-only/.test(refused),
         refused.slice(0, 140))
       check('the refused text landed nowhere', lockedValue === '', JSON.stringify(lockedValue))
+
+      // The page refuses this focus before any question about typing can be
+      // answered, so the reason has to come from the element's own state.
+      const refusedOff = await refusal(() => browser.type(off, 'nope'))
+      const offValue = await step('read the disabled field', 30_000,
+        () => browser.evaluate('document.querySelector("#off").value'))
+      check('a disabled field is refused by name, with the page\'s own reason',
+        /would not take the text because it is disabled/.test(refusedOff),
+        refusedOff.slice(0, 140))
+      check('nothing was typed into the disabled field', offValue === '', JSON.stringify(offValue))
+
       const typed = await step('type into the field that takes text', 30_000, () => browser.type(free, 'hello'))
       const freeValue = await step('read the other field', 30_000,
         () => browser.evaluate('document.querySelector("#free").value'))
@@ -861,11 +895,29 @@ async function main() {
       writeFileSync(join(OUT_DIR, 'shot-fullpage.jpg'), fullShot.jpeg)
     }
 
+    log('\n[26] a locator that matches two elements lists them, with what tells them apart')
+    const ambiguousUrl = `data:text/html;charset=utf-8,${encodeURIComponent(AMBIGUOUS_FIXTURE)}`
+    await step('navigate to the ambiguous fixture', 30_000, () => browser.navigate(ambiguousUrl))
+    const byText = await refusal(() => browser.click({ text: 'Stop' }))
+    const byCss = await refusal(() => browser.click({ selector: 'button' }))
+    check('a text locator that matches twice refuses and names the two ancestors',
+      /matches 2 elements/.test(byText) && /region "Running"/.test(byText) && /region "Idle"/.test(byText),
+      byText.slice(0, 160))
+    // The same two elements reached the other way: a selector walks the DOM,
+    // which describes no names, and the tree is where the refusal's answer lives.
+    check('a selector that matches twice reports the same ancestors instead of claiming there are none',
+      /matches 2 elements/.test(byCss) && /region "Running"/.test(byCss)
+        && /region "Idle"/.test(byCss) && !/no named ancestor/.test(byCss),
+      byCss.slice(0, 160))
+    check('neither refusal pressed anything',
+      (await step('read whether the fixture was clicked', 30_000,
+        () => browser.evaluate('globalThis.__clicked === true'))) === false,
+      'a refused locator acted anyway')
+
   } finally {
     await browser.close().catch(() => {})
     await rm(userDataDir, { recursive: true, force: true }).catch(() => {})
-  }
-  const failed = results.filter(entry => !entry.passed)
+  }  const failed = results.filter(entry => !entry.passed)
   writeFileSync(join(OUT_DIR, 'report.md'), [
     '# dsh-browser snapshot regression',
     '',

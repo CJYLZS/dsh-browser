@@ -19,6 +19,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   assertImageRoute,
   attachmentStoreOf,
+  imageRefOf,
   llmServiceOf,
   type AttachmentStore,
   type ImageRef,
@@ -58,6 +59,31 @@ function executionAt(provider?: string, model?: string): ToolRunContext {
     signal: new AbortController().signal,
   } as unknown as ToolRunContext
 }
+
+test('an image reference is reported with exactly the fields this plugin declares', () => {
+  // A store's record is wider than this plugin's report — the real one answers
+  // with `name`, measured 2026-09-29 — and the declared output schema refuses any
+  // property it does not name, so what comes back has to be built from the
+  // fields that are declared rather than passed through.
+  const answered = {
+    ...REF,
+    name: 'shot-1790661112880.jpg',
+    originalDimensions: { width: 600, height: 200 },
+    storedAt: 'something only the store knows',
+  } as ImageRef
+  assert.deepEqual(imageRefOf(answered), {
+    attachmentId: 'att-1',
+    mediaType: 'image/jpeg',
+    bytes: 4,
+    width: 300,
+    height: 100,
+    name: 'shot-1790661112880.jpg',
+    originalDimensions: { width: 600, height: 200 },
+  })
+  // Absent optional fields stay absent rather than arriving as `undefined`,
+  // which is not a value the schema can express.
+  assert.deepEqual(imageRefOf(REF), REF)
+})
 
 test('the attachment service is found only when it can actually store an image', () => {
   const store: AttachmentStore = { saveImage: async () => REF }

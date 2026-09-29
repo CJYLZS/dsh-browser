@@ -865,6 +865,52 @@ test('an inlined capture asks the attachments service, and renders its image blo
   assert.deepEqual(result.content?.[1], { type: 'image', attachment: stored })
 })
 
+test('an attachment reference carrying more than this tool declares is reported by the declared fields', async () => {
+  const h = await ptcHarness()
+  // Measured 2026-09-29 in this GUI: the real store answers with `name` (and its
+  // own type carries `originalDimensions`), while this tool declared five fields
+  // and `additionalProperties: false` — so the whole tool result failed
+  // validation with `"value.image.name" is not a declared property` and the
+  // capture the model asked for came back as an error, attachment already
+  // written. A store field this tool does not report must not be able to do that.
+  h.ctx.provide('attachments', {
+    saveImage: async () => ({
+      attachmentId: 'att-1',
+      mediaType: 'image/jpeg',
+      bytes: 3,
+      width: 11,
+      height: 9,
+      name: 'shot-1790661112880.jpg',
+      originalDimensions: { width: 22, height: 18 },
+      storedAt: 'a field this tool does not report',
+    }),
+  })
+  h.ctx.provide('llm', { resolveModelInfo: async () => ({ inputModalities: ['text', 'image'] }) })
+  const result = await h.ctx.tools.execute({
+    callId: 'inline-3',
+    name: 'browser_screenshot',
+    arguments: { inline: true },
+    signal: new AbortController().signal,
+    agent: {
+      id: 'session-a',
+      session: { header: {}, append: () => {}, requestHeader: () => ({ config: { provider: 'p', model: 'vision' } }) },
+    } as unknown as Agent,
+  }) as { isError: boolean; error?: { message: string }; content?: { type: string; attachment?: unknown }[] }
+  assert.equal(result.isError, false, `the tool result was refused: ${result.error?.message ?? ''}`)
+  assert.deepEqual(result.content?.[1], {
+    type: 'image',
+    attachment: {
+      attachmentId: 'att-1',
+      mediaType: 'image/jpeg',
+      bytes: 3,
+      width: 11,
+      height: 9,
+      name: 'shot-1790661112880.jpg',
+      originalDimensions: { width: 22, height: 18 },
+    },
+  })
+})
+
 test('an inlined capture on a model without image input is refused before anything is captured', async () => {
   const h = await ptcHarness()
   h.ctx.provide('attachments', { saveImage: async () => ({}) })

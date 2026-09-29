@@ -37,6 +37,7 @@ import { pageInfoFromMetrics, type PageInfo } from './page-info.ts'
 import { PortAllocator } from './ports.ts'
 import { profileDirFor } from './profile.ts'
 import {
+  entryInTree,
   locateAmbiguousError,
   locateInTree,
   locateMissError,
@@ -495,6 +496,22 @@ async function sleep(ms: number): Promise<void> {
 function elementGone(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return /no node with given id|node with given id|no node found|could not find node|detached|not attached/iu.test(message)
+}
+
+/**
+ * Chrome's own words from a protocol failure.
+ *
+ * A transport wraps every protocol error as `cdpSession.send: Protocol error
+ * (DOM.focus): Element is not focusable`, and only the last part is the browser
+ * speaking. Quoting the wrapper at a model gives it a sentence about this
+ * plugin's plumbing where the page's own reason belongs.
+ * @param error - what the protocol call rejected with.
+ * @returns the reason, without the transport's framing.
+ */
+function protocolReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  const said = /Protocol error \([^)]*\):\s*([\s\S]+)$/u.exec(message)
+  return said?.[1]?.trim() ?? message
 }
 
 /**
@@ -1051,17 +1068,23 @@ function typedProbe(): string {
     const element = this.nodeType === 1 ? this : this.parentElement
     if (element === null) return { accepts: false, why: 'it is not an element' }
     const active = element.ownerDocument.activeElement
-    if (active === null || (active !== element && !element.contains(active))) {
-      return { accepts: false, why: 'the page did not focus it' }
-    }
-    if (active.disabled === true) return { accepts: false, why: 'it is disabled' }
-    if (active.readOnly === true) return { accepts: false, why: 'it is read-only' }
-    const tag = String(active.tagName === undefined ? '' : active.tagName).toLowerCase()
-    const type = String(active.type === undefined ? '' : active.type).toLowerCase()
+    const focused = active !== null && (active === element || element.contains(active))
+    // What would take the text is the control the page focused; when the focus
+    // never landed, the element itself is all there is to ask, and its own state
+    // is why the focus was refused — a disabled control rejects the focus before
+    // any question about typing can be answered.
+    const target = focused ? active : element
+    if (target.disabled === true) return { accepts: false, why: 'it is disabled' }
+    if (target.readOnly === true) return { accepts: false, why: 'it is read-only' }
+    const tag = String(target.tagName === undefined ? '' : target.tagName).toLowerCase()
+    const type = String(target.type === undefined ? '' : target.type).toLowerCase()
     const textless = ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']
-    if (tag === 'textarea' || (tag === 'input' && textless.indexOf(type) === -1)) return { accepts: true }
-    if (active.isContentEditable === true) return { accepts: true }
-    return { accepts: false, why: 'it takes no typed text' }
+    const takes = tag === 'textarea'
+      || (tag === 'input' && textless.indexOf(type) === -1)
+      || target.isContentEditable === true
+    if (!takes) return { accepts: false, why: 'it takes no typed text' }
+    if (!focused) return { accepts: false, why: 'the page did not focus it' }
+    return { accepts: true }
   }`
 }
 
@@ -2176,8 +2199,20 @@ export class SessionBrowser {
       if (target === undefined) return await this.settle(before, {}, await write())
       const { target: resolved, recovered, result } = await this.actOn(target, async (found) => {
         await cdp.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: found.backendNodeId }).catch(() => {})
-        await cdp.send('DOM.focus', { backendNodeId: found.backendNodeId })
-        await this.assertTyped(cdp, found)
+        // The focus is not taken on trust: a control that cannot be focused —
+        // measured 2026-09-29, a disabled input — makes `DOM.focus` itself
+        // reject, which is a protocol failure the page has a reason for. The
+        // page is asked anyway, so the refusal names the element and the reason
+        // rather than the transport's framing of the call.
+        const refused = await cdp.send('DOM.focus', { backendNodeId: found.backendNodeId })
+          .then(() => undefined, (error: unknown) => error)
+        const answer = await this.assertTyped(cdp, found)
+        if (refused !== undefined && answer?.accepts !== false) {
+          throw new Error(
+            `dsh-browser: the page would not focus ${elementName(found)} (${protocolReason(refused)}); `
+            + 'nothing was typed, so take a new snapshot and check the element',
+          )
+        }
         if (options.clear !== false) {
           // Selection is the one part of this that is not a trusted event: what
           // follows is the insertion, which is.
@@ -2301,15 +2336,18 @@ export class SessionBrowser {
     }
     const found: Located[] = []
     for (const nodeId of matched) {
-      const described = await cdp.send('DOM.describeNode', { nodeId })
+      const answer = await cdp.send('DOM.describeNode', { nodeId })
         .catch(() => undefined) as { node?: { backendNodeId?: number; nodeName?: string } } | undefined
-      const backendNodeId = described?.node?.backendNodeId
+      const backendNodeId = answer?.node?.backendNodeId
       if (backendNodeId === undefined) continue
-      const known = nodes.find(node => node.backendDOMNodeId === backendNodeId)
-      const target = known === undefined ? undefined : refTargetOf(known)
-      found.push(target === undefined
-        ? { backendNodeId, role: (described?.node?.nodeName ?? 'element').toLowerCase(), name: '', trail: [] }
-        : { ...target, trail: [] })
+      // The tree names the match when it describes it, which is what a refusal
+      // lists; when it does not, the element stays described by nothing, and the
+      // absence of a trail is reported as exactly that rather than as an answer.
+      found.push(entryInTree(nodes, backendNodeId) ?? {
+        backendNodeId,
+        role: (answer?.node?.nodeName ?? 'element').toLowerCase(),
+        name: '',
+      })
     }
     return found
   }
@@ -2554,13 +2592,14 @@ export class SessionBrowser {
    * leaves the old behaviour in place.
    * @param cdp - session attached to the active page.
    * @param target - the element a ref names.
+   * @returns the page's answer, or `undefined` when the page said nothing usable.
    * @throws {Error} when the page says the text would not land in the element.
    */
-  private async assertTyped(cdp: CDPSession, target: RefTarget): Promise<void> {
+  private async assertTyped(cdp: CDPSession, target: RefTarget): Promise<TypedAnswer | undefined> {
     const resolved = await cdp.send('DOM.resolveNode', { backendNodeId: target.backendNodeId })
       .catch(() => undefined) as { object?: { objectId?: string } } | undefined
     const objectId = resolved?.object?.objectId
-    if (objectId === undefined) return
+    if (objectId === undefined) return undefined
     const answer = await cdp.send('Runtime.callFunctionOn', {
       objectId,
       functionDeclaration: typedProbe(),
@@ -2571,6 +2610,7 @@ export class SessionBrowser {
     if (said !== undefined && !said.accepts) {
       throw untypableError(target, said.why ?? 'the page would not take it')
     }
+    return said
   }
 
   /**

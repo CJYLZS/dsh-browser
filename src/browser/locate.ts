@@ -43,8 +43,19 @@ export interface Locator {
 
 /** One element a locator could mean, with what tells it from the others. */
 export interface Located extends RefTarget {
-  /** Names of the nearest ancestors that have one, nearest first. */
-  readonly trail: readonly string[]
+  /**
+   * Names of the nearest ancestors that have one, nearest first.
+   *
+   * Absent is a different fact from empty, and the refusal words them
+   * differently: an empty list is a node the tree describes whose ancestors have
+   * no names, and *no* list is a node the tree does not describe at all — what a
+   * CSS selector can reach and the accessibility tree cannot see. Measured
+   * 2026-09-29 on the-internet's add/remove page: the same two buttons read as
+   * `in RootWebArea "The Internet"` through `text` and as `no named ancestor`
+   * through `selector`, because the selector path filled in an empty trail it had
+   * never looked for.
+   */
+  readonly trail?: readonly string[]
 }
 
 /** How many named ancestors a candidate reports; enough to tell siblings apart. */
@@ -206,11 +217,34 @@ export function locateMissError(locator: Locator): Error {
  */
 export function locateAmbiguousError(locator: Locator, candidates: readonly Located[]): Error {
   const lines = candidates.map((candidate, index) => {
-    const where = candidate.trail.length === 0 ? 'no named ancestor' : `in ${candidate.trail.join(' < ')}`
+    const trail = candidate.trail
+    const where = trail === undefined
+      ? 'not described by the accessibility tree'
+      : trail.length === 0 ? 'no named ancestor' : `in ${trail.join(' < ')}`
     return `\n  ${String(index + 1)}. ${candidate.role} ${JSON.stringify(candidate.name)} — ${where}`
   })
   return new Error(
     `dsh-browser: ${describeLocator(locator)} matches ${String(candidates.length)} elements:`
     + `${lines.join('')}\nNarrow it with a name that is unique, or call browser_snapshot and act on the ref of the one you mean.`,
   )
+}
+
+/**
+ * One element of an accessibility tree, named as a refusal names it.
+ *
+ * For a caller that reached an element some other way — a CSS selector walks the
+ * DOM, which describes no names — and still has to report the element and where
+ * it sits. The tree is the only place those two facts live, so this is the same
+ * lookup a tree-shaped locator does, which is what keeps one element from
+ * reading two different ways depending on which locator found it.
+ * @param nodes - the flat node list CDP returned.
+ * @param backendNodeId - the DOM node to describe.
+ * @returns the element, or `undefined` when the tree does not describe that node.
+ */
+export function entryInTree(nodes: readonly AxNode[], backendNodeId: number): Located | undefined {
+  const node = nodes.find(candidate => candidate.backendDOMNodeId === backendNodeId)
+  if (node === undefined) return undefined
+  const target = refTargetOf(node)
+  if (target === undefined) return undefined
+  return { ...target, trail: trailOf(node, parentsOf(nodes)) }
 }
