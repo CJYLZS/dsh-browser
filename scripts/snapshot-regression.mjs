@@ -389,7 +389,19 @@ async function main() {
     check('the whole page fits in one snapshot at the default budget', !first.truncated,
       `${first.nodes} nodes, elided budget=${first.elided.budget} depth=${first.elided.depth}`)
     check('one-letter text boxes are gone', inlineBoxes === 0, `${inlineBoxes} InlineTextBox lines`)
-    check('the snapshot is bigger than the old third-of-a-page budget', first.nodes > 300, `${first.nodes} nodes`)
+    // The page's own node count moves with the site, so the claim about the
+    // budget is measured, not assumed: a smaller budget really does cut a real
+    // page and says so, and the default is the one that fit it whole.
+    const squeezed = await step('snapshot at a smaller budget', 60_000, async () => {
+      await browser.reconfigure(plainConfig(Config({ ...config, snapshotNodes: 100, userDataDir: config.userDataDir })))
+      const answer = await browser.snapshot()
+      await browser.reconfigure(plainConfig(Config({ ...config, snapshotNodes: 500, userDataDir: config.userDataDir })))
+      return answer
+    })
+    check('a smaller budget really cuts a real page, and says what to ask for next',
+      first.nodes > 100 && squeezed.truncated && squeezed.elided.budget > 0
+        && squeezed.text.includes('take a narrower snapshot'),
+      `${first.nodes} nodes at the default; squeezed to ${squeezed.nodes}, elided ${squeezed.elided.budget}`)
     check('page geometry is reported', first.info.viewportWidth > 0 && first.info.pageHeight >= first.info.viewportHeight,
       JSON.stringify(first.info))
     const links = first.text.split('\n').filter(line => line.includes('url="http')).length
