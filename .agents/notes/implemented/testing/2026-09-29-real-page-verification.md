@@ -146,6 +146,46 @@ dom: ~ button "↗" → "✓"; ~ span "2 tabs opened" → "3 tabs opened"
 
 这与"替换文档的点击读得太早"是**同一个根因面**：settle 只等"当前文档安静"，不等"新文档 / 新页面提交"。区别在后果更大——`tabsText` 的注释明说这行就是为此存在的（*a caller that could not see that would keep describing the page it left behind*），而这里正是它没起作用的那种情形：调用方被告知"还在旧页"，下一次调用却已经落在它从未被告知的新页上。修法同上：动作之后先等"文档/页面提交"这件事，再读状态与页列表。
 
+### 新发现：点击不看元素能不能用（与输入不对称）
+
+`/practice/dynamic-waits` 上有一个初始禁用的 `Submit`（快照里就写着 `button "Submit" [disabled]`）。点它：
+
+```
+Clicked button "Submit".
+The page did not change. That is what the page says, not a verdict on the action: …
+```
+
+`browser_type` 对禁用输入框是会点名拒绝的（上一轮刚修：`would not take the text because it is disabled; nothing was typed`），而 `browser_click` 对禁用按钮既照派事件、也照报 `Clicked`，唯一的相关提示是那句对所有"没变化"都一样的"读作：还没看到可观察的变化"。模型据此最自然的下一步是再点一次或去找遮罩，而真正的原因（按钮还没启用）一个字都没有。Playwright 的 actionability 里 "Enabled" 与 "Receives Events" 是并列的两条，我们只做了后者。
+
+### 新发现：等待没有"可用"这个条件
+
+同一页的演示文案是 "Button becomes enabled 3 seconds after arming"——**"等到某个控件可用"正是动态等待最核心的场景**，而 `browser_wait` 的条件只有 text / role+name / selector / url / time。为了把它钉成可复现的证据，往页面里注入一个稳定禁用的按钮再等它：
+
+```
+注入： <button id="dsh-disabled-probe" disabled="">Submit probe</button>
+browser_wait({role: "button", name: "Submit probe"})
+→ Waited 0.5 s — button "Submit probe" is on the page.
+```
+
+按钮一直是禁用的，等待却当场成功——因为"在页面上"与"能按"是两件事，而条件语言只有前者。调用方只能退到 `time: 3000`（它自己的文案称之为"最后手段"）或在 `evaluate` 里轮询。
+
+### 新发现：布尔属性的方向读不出来（加了和删了是同一条）
+
+同一个注入的按钮，用两个各改一次的按钮分别驱动，回报是**一模一样**的一行：
+
+| 动作 | 回报 |
+| --- | --- |
+| `probe.disabled = true`（加上属性） | `dom: ~ button "Submit probe" disabled: (none) → (none)` |
+| `probe.disabled = false`（移除属性） | `dom: ~ button "Submit probe" disabled: (none) → (none)` |
+
+真机先量过 Chrome 给的是什么：移除时 `MutationRecord.oldValue` 是 `""`，回调时 `getAttribute('disabled')` 是 `null`。根因在主机侧 [`readChange`](../../../../src/browser/session-browser.ts) 的 `said()`：
+
+```js
+if (typeof value !== 'string' || value === '') return undefined
+```
+
+它把**空串当成"页面没说"**，可 `disabled=""` 的空串恰恰是它真实的值（布尔属性一律如此：`checked`、`selected`、`required`、`readonly`、`hidden`…）。于是 `from: ''` 被丢掉，两边都渲染成 `(none)`——"这个属性被加上/被移除"这个信息完全丢失。页面侧其实把该给的都给了（`attributeOldValue: true`，`oldValue` 实测是 `""`），丢掉它的是我们自己这一侧。
+
 ### 两条"留给 evaluate"的实测结论（记下来，省得下次重新怀疑）
 
 - **拖拽能做到，但必须给坐标。** 页面的重排发生在 `dragover` 里、按 `e.clientY` 决定插到谁前面：`dragstart` 打在源上、`dragover` 打在目标上（带 `clientX`/`clientY`）、再 `dragend`，`Item 1:- Inbox` 从第一挪到了最后。第一次探的时候没带坐标（`clientY` 为 0），顺序纹丝不动——所以"拖拽做不到"曾经是个**假发现**，是量第二遍量掉的。
@@ -167,7 +207,7 @@ dom: ~ button "↗" → "✓"; ~ span "2 tabs opened" → "3 tabs opened"
 - 三个缺口的共同形状值得记住：**假件的形状决定测试能看见什么**。假 CDP 的 `DOM.focus` 永远成功、假 store 只答声明过的字段，于是"禁用"与"多字段"这两个真实形状在测试里不存在。
 - **`inline` 这条链路的闭环依赖一次插件重载**：DSH 在加载插件时读入 `lib/index.js`，`pnpm run build` 只更新磁盘上的产物，所以界面上仍跑旧模块时同一个调用会继续报校验错误——那不是修复没生效，是模块没被换掉。2026-09-29 重载后复验通过（见上一节）。下次改 host 半边时按同一顺序：改源码 → 跑测试 → `pnpm run build` → 重载/重启 → 用工具面复验一次。
 - 两条欠账在同一次复验里销掉：`/login` 的 `Username` / `Password` 无障碍名确实来自关联 `<label for>`（页面里既没有 `placeholder` 也没有 `aria-label`，浏览器自己的 `input.labels` 也答同一个词）；`/login` 上 `text: "Login"` 同时命中 `heading "Login Page"` 与 `button " Login"` 而被拒，补上 `role: "button"` 就命中按钮——`role`+`name` 的消歧在真实页面上成立。
-- 这一轮之前的三条结论都被复验为真，但**两遍真机过下来又找出六条新的**，按优先级是：子帧内容不在快照里且 ref / `selector` 都到不了（`Iframe` 节点在原始树里 `childIds: []`，是 Chrome 的整页树不含子帧，属功能级改动）＞`window.open` 开出的新页赶上不这次回报（三次里漏两次，而那一行正是为防止"调用方继续描述它已经离开的页面"存在的）＞替换文档的点击会报出一个页面从未有过的标题（`page.title()` 在答不上来时自编 `Loading <url>`）＞`selector` 进不到 shadow root（三处 `DOM.getDocument` 都没带 `pierce`）＞`find` 只搜 role 与名字、却声称搜的是打印出来的文字＞"没有匹配的 selector"这条错误在有子帧时给的建议是死路（它叫调用方去取一个不会出现的 ref，这一条随前几条一起修）。后四条其实是同一句话的四个面：**回报是在页面把话说完之前读的**。一次真机过一遍的价值不在"确认已修的"，而在这种只会在真实导航时序、真实帧结构与真实影子根里出现的缺陷。
+- 这一轮之前的三条结论都被复验为真，但**三遍真机过下来又找出九条新的**，按优先级是：子帧内容不在快照里且 ref / `selector` 都到不了（`Iframe` 节点在原始树里 `childIds: []`，是 Chrome 的整页树不含子帧，属功能级改动）＞`window.open` 开出的新页赶不上这次回报（三次里漏两次，而那一行正是为防止"调用方继续描述它已经离开的页面"存在的）＞替换文档的点击会报出一个页面从未有过的标题（`page.title()` 在答不上来时自编 `Loading <url>`）＞点击不看元素能否使用（与输入的拒绝不对称）＞等待没有"可用"这个条件＞布尔属性的方向读不出来（`disabled` 加了和删了印成同一行，根因是我们自己的 `readChange` 丢掉空串）＞`selector` 进不到 shadow root（三处 `DOM.getDocument` 都没带 `pierce`）＞`find` 只搜 role 与名字、却声称搜的是打印出来的文字＞"没有匹配的 selector"这条错误在有子帧时给的建议是死路（它叫调用方去取一个不会出现的 ref，这一条随前几条一起修）。前三条其实是同一句话的三个面：**回报是在页面把话说完之前读的**。一次真机过一遍的价值不在"确认已修的"，而在这种只会在真实导航时序、真实帧结构与真实影子根里出现的缺陷。
 
 ## Related
 
