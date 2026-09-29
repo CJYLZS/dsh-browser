@@ -108,6 +108,49 @@ The page changed: title.
 
 修法要落在 settle 那一层（装一个导航观察者，等新文档提交之后再读状态，并把"文档被替换"本身当作一次变化报出来），那是本仓库最敏感的一处，不在本轮修复范围。
 
+### 新发现：`selector` 进不到 shadow root 里的元素（与子帧同一个形状）
+
+`testing.qaautomationlabs.com/shadow-dom.php` 的影子根里那个 `div.box`（`aria-label="Shadow DOM message box"`）在快照里是 `generic "Shadow DOM message box"`，**点它的 ref 成功**——`document.elementFromPoint` 在影子根那里只会返回宿主，所以这一次成功说明落点判定确实钻进了影子根（与笔记里写的行为一致）。但 `selector: "#shadow-host .box"` → `no element matches selector`。
+
+根因是三处 `DOM.getDocument` 都没有 `pierce`（`session-browser.ts:2018`、`:2057`、`:2320`，都是 `{ depth: 0 }`），于是 `DOM.querySelector(All)` 的搜索面只是主文档的浅层。ref 能进影子根是因为 AX 树为影子节点也给了 `backendDOMNodeId`。**这与子帧那条是同一个形状**：`selector` 能到的地方比 ref 少，而"没有匹配"的错误在两种情形里都建议去找一个不会出现的 ref。
+
+### 新发现：`find` 的搜索面比它自己声称的窄
+
+实测（同一个站点）：`find: "tablist"` 命中那个 tablist 节点，而 `find: "level=\"1\""` 与 `find: "orientation"` 都返回 `Nothing in the page matches …`——可这两样确实印在快照的行里（`heading "…" level="1"`、`tablist orientation="horizontal"`）。所以 `find` 搜的是 **role 与名字**，不是"快照打印出来的文字"；工具描述里那句 "a query is tested against the text a snapshot prints" 不准确，照着自己看到的那行去搜的调用方会得到"页面里没有"的答复（而 `level=` / `url=` 这类属性恰好是模型最可能拿来筛的那几个）。
+
+### 第二遍：<https://qaplayground.com/>（Next.js，14+ 个组件）
+
+- **多标签的接管是对的**：点 `↗Open Tab A`（页面里是 `window.open`）那一次，回报正文就是新页，页列表是 `[0] https://qaplayground.com/practice/tabs-windows` 加 `[active] https://qaplayground.com/`。调用方**没有**"选某个页面"的参数，这是有意的（`src/tools/index.ts` 里 `tabsText` 的注释：*the pages are not the caller's to choose*）。退回原页有两条路：在 `browser_evaluate` 里 `window.close()` 关掉新页（实测两次都随即退回原页），或按地址导航回去（丢页面状态）。页列表里的 `[0]` 只是标号，没有任何参数收它——**界面上也看不到**：`src/client/api.ts` 里有 `tabs`，但只有设置页横幅用它显示"n 个页面"，面板那一侧是一个观察窗、跟着活动页走（`view.tsx` 里的 `tab` 是 DSH 自己的标签信息）。所以"浏览器开了几个页面"只能从工具回报与设置页看出来。
+- **但三次里只有第一次抓住了新页**，第二、三次都漏了（见下）。
+- 这一遍只走了多标签；数据表、动态等待、无限滚动没走。
+
+### 新发现：`window.open` 开出的新页可能赶不上这次回报
+
+三次点开新标签，第二、三次的回报是这样的（以第三次为例，页面自己已经数到 `3 tabs opened`）：
+
+```
+Clicked button "↗Open Tab C".
+Page: https://qaplayground.com/practice/tabs-windows — "How to Handle Tabs and Windows…"
+The page changed: dom.
+dom: ~ button "↗" → "✓"; ~ span "2 tabs opened" → "3 tabs opened"
+
+[active] https://qaplayground.com/practice/tabs-windows
+```
+
+回报里**只有一个页面**，正文说页面停在旧页。紧接着的下一次调用（一个 `depth: 1` 的快照）里却是两个页面、活动页已经是新页：
+
+```
+[0] https://qaplayground.com/practice/tabs-windows
+[active] https://qaplayground.com/practice/links
+```
+
+这与"替换文档的点击读得太早"是**同一个根因面**：settle 只等"当前文档安静"，不等"新文档 / 新页面提交"。区别在后果更大——`tabsText` 的注释明说这行就是为此存在的（*a caller that could not see that would keep describing the page it left behind*），而这里正是它没起作用的那种情形：调用方被告知"还在旧页"，下一次调用却已经落在它从未被告知的新页上。修法同上：动作之后先等"文档/页面提交"这件事，再读状态与页列表。
+
+### 两条"留给 evaluate"的实测结论（记下来，省得下次重新怀疑）
+
+- **拖拽能做到，但必须给坐标。** 页面的重排发生在 `dragover` 里、按 `e.clientY` 决定插到谁前面：`dragstart` 打在源上、`dragover` 打在目标上（带 `clientX`/`clientY`）、再 `dragend`，`Item 1:- Inbox` 从第一挪到了最后。第一次探的时候没带坐标（`clientY` 为 0），顺序纹丝不动——所以"拖拽做不到"曾经是个**假发现**，是量第二遍量掉的。
+- **上传给不了真实路径。** `browser_type` 对 `<input type=file>` 的拒绝是对的（`input would not take the text because it takes no typed text`；那个 input 本身 `display: none`，所以它不在树里、快照里只有样式化的 `LabelText "Browse for a file to upload"`）。要给它文件只能在 `evaluate` 里造 `File` 塞进 `DataTransfer` 再触发 `change`——页面确实认（`Selected File: dsh-probe.txt & File Size is 0.01 KB`）。也就是说调用方能给的永远是**内容**，不是磁盘上那个文件；`DOM.setFileInputFiles` 没有工具包。
+
 ## Alternatives considered
 
 **只跑 `pnpm test` 与回归就算验证完。** 否决——这正是三个缺口漏过去的方式：单测用的是假 CDP 与假 store，回归只驱动 `SessionBrowser`，两者都看不到"工具层的结果要过 harness 的 `output.schema` 校验"这一层，也看不到 Chrome 对某个具体控件会怎么答。
@@ -124,7 +167,7 @@ The page changed: title.
 - 三个缺口的共同形状值得记住：**假件的形状决定测试能看见什么**。假 CDP 的 `DOM.focus` 永远成功、假 store 只答声明过的字段，于是"禁用"与"多字段"这两个真实形状在测试里不存在。
 - **`inline` 这条链路的闭环依赖一次插件重载**：DSH 在加载插件时读入 `lib/index.js`，`pnpm run build` 只更新磁盘上的产物，所以界面上仍跑旧模块时同一个调用会继续报校验错误——那不是修复没生效，是模块没被换掉。2026-09-29 重载后复验通过（见上一节）。下次改 host 半边时按同一顺序：改源码 → 跑测试 → `pnpm run build` → 重载/重启 → 用工具面复验一次。
 - 两条欠账在同一次复验里销掉：`/login` 的 `Username` / `Password` 无障碍名确实来自关联 `<label for>`（页面里既没有 `placeholder` 也没有 `aria-label`，浏览器自己的 `input.labels` 也答同一个词）；`/login` 上 `text: "Login"` 同时命中 `heading "Login Page"` 与 `button " Login"` 而被拒，补上 `role: "button"` 就命中按钮——`role`+`name` 的消歧在真实页面上成立。
-- 这一轮之前的三条结论都被复验为真，但**复验本身又找出三条新的**：子帧内容不在快照里且 ref / `selector` 都到不了（`Iframe` 节点在原始树里 `childIds: []`，是 Chrome 的整页树不含子帧，属功能级改动）；替换文档的点击会报出一个页面从未有过的标题（`page.title()` 在答不上来时自编 `Loading <url>`）；以及"没有匹配的 selector"这条错误在页面有子帧时给的建议是死路。一次真机过一遍的价值不在"确认已修的"，而在这种只会在真实导航时序与真实帧结构里出现的缺陷。
+- 这一轮之前的三条结论都被复验为真，但**两遍真机过下来又找出六条新的**，按优先级是：子帧内容不在快照里且 ref / `selector` 都到不了（`Iframe` 节点在原始树里 `childIds: []`，是 Chrome 的整页树不含子帧，属功能级改动）＞`window.open` 开出的新页赶上不这次回报（三次里漏两次，而那一行正是为防止"调用方继续描述它已经离开的页面"存在的）＞替换文档的点击会报出一个页面从未有过的标题（`page.title()` 在答不上来时自编 `Loading <url>`）＞`selector` 进不到 shadow root（三处 `DOM.getDocument` 都没带 `pierce`）＞`find` 只搜 role 与名字、却声称搜的是打印出来的文字＞"没有匹配的 selector"这条错误在有子帧时给的建议是死路（它叫调用方去取一个不会出现的 ref，这一条随前几条一起修）。后四条其实是同一句话的四个面：**回报是在页面把话说完之前读的**。一次真机过一遍的价值不在"确认已修的"，而在这种只会在真实导航时序、真实帧结构与真实影子根里出现的缺陷。
 
 ## Related
 
