@@ -15,6 +15,7 @@ import type { SidebarRightTabInfo, UseSidebarRightTabInfo } from '@deepseek-ai/d
 import { clipboardChord, clipboardReply, pasteMessage, type ReadingChord } from './clipboard.ts'
 import { AddressGlobe } from './glyph.ts'
 import { keyMessage } from './keys.ts'
+import { targetIdOf } from './pages.ts'
 import { en, type DshBrowserKey } from './locales.ts'
 
 /** Absolute path the host serves the mirror on. */
@@ -46,9 +47,11 @@ export interface BrowserBodyProps {
   /**
    * The tab this body is mounted in.
    *
-   * Supplied by the Sidebar's own seat alongside whatever `inject` names, so the
-   * pane can close itself: the browser is the only reason it exists, and a pane
-   * left behind is a viewer the host has to keep from starting one again.
+   * Supplied by the Sidebar's own seat alongside whatever `inject` names. A tab
+   * names the page it mirrors — its address is built from the page's CDP target
+   * id — and that is what decides which page is mirrored here and driven from
+   * here: one tab, one page. A tab that names no page (the guide entry's, while
+   * the browser is starting) mirrors the page the tools act on.
    */
   readonly useTabInfo?: UseSidebarRightTabInfo | undefined
 }
@@ -279,9 +282,10 @@ function IconButton(props: {
  */
 export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): ReactNode {
   const copy = copyOf(t)
-  // Read once per render, the way a hook is read: it is what closes this pane
-  // when the browser it mirrors is the thing going away.
+  // Read once per render, the way a hook is read: it is what says which page
+  // this pane is on.
   const tab: SidebarRightTabInfo | undefined = useTabInfo?.()
+  const pageId = tab === undefined ? undefined : targetIdOf(tab.tab.contentId)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | undefined>(undefined)
   const lastMoveRef = useRef(0)
@@ -319,6 +323,10 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
   useEffect(() => {
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const query = new URLSearchParams({ session: sessionId })
+    // A tab names its page; the socket is bound to that page, so its frames,
+    // its input, and its address bar are the page's whether or not the tools
+    // act on it right now.
+    if (pageId !== undefined) query.set('page', pageId)
     const socket = new WebSocket(`${scheme}//${location.host}${STREAM_PATH}?${query.toString()}`)
     socket.binaryType = 'arraybuffer'
     socket.onopen = () => { setConnected(true) }
@@ -351,7 +359,7 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
       socketRef.current = undefined
       socket.close()
     }
-  }, [drawFrame, sessionId])
+  }, [drawFrame, sessionId, pageId])
 
   // The agent drives the same browser, so the address bar follows the page
   // rather than owning it.
@@ -428,7 +436,6 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
   // A browser that is gone or broken cannot be recovered by waiting: the pane
   // offers the one action that does recover it, which is starting a new one.
   const recoverable = failure !== undefined || state === 'failed' || state === 'closed'
-  const live = state === 'ready' || state === 'starting'
 
   return (
     <div style={style.root}>
@@ -573,27 +580,11 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
       </div>
       <div style={style.status}>
         {/* The address bar carries the page; this row carries what the address
-            bar cannot — which browser is behind it. */}
+            bar cannot — which browser is behind it. A page is closed from its
+            tab, not from inside the pane: the tab is what names it. */}
         <span style={style.statusText}>
           {status?.debugPort === undefined ? '' : `${copy('endpoint')} 127.0.0.1:${status.debugPort}`}
         </span>
-        {live
-          ? (
-            <button
-              type="button"
-              style={style.statusButton}
-              onClick={() => {
-                // The browser goes, and the pane goes with it: a viewer left
-                // subscribed to a browser the user has stopped is one more thing
-                // that could bring it back, and nothing to watch either way.
-                send({ type: 'close' })
-                tab?.tab.actions.close()
-              }}
-            >
-              {copy('closeBrowser')}
-            </button>
-          )
-          : null}
       </div>
     </div>
   )

@@ -16,8 +16,16 @@ export interface ClientTab {
   readonly index: number
   /** Address the page reports. */
   readonly url: string
-  /** Whether this is the page the tools and the mirror act on. */
+  /** Whether this is the page the tools act on. */
   readonly active: boolean
+  /**
+   * The page's CDP target id — its stable identity, and what the sidebar's own
+   * tab for it is addressed by. Absent only in the moment between a page
+   * existing and its session answering for it.
+   */
+  readonly targetId?: string
+  /** What the page last said its title was, when that is known. */
+  readonly title?: string
 }
 
 /** What the host says about one session's browser. */
@@ -54,4 +62,24 @@ export async function browserStatus(): Promise<ClientBrowserReport> {
   const response = await fetch('/dsh-browser/status', { headers: { Accept: 'application/json' } })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
   return await response.json() as ClientBrowserReport
+}
+
+/**
+ * Ask the host to close one browser page.
+ *
+ * This is what closing a sidebar tab does to the page it mirrored: the tab's
+ * own close handler fires here, before the tab is removed. The host decides
+ * what the close means — one page among several closes alone, the last one
+ * stops the browser — so the client never has to count pages it cannot see.
+ * @param sessionId - the session whose browser holds the page.
+ * @param targetId - the page's CDP target id.
+ * @throws {Error} when the route refuses.
+ */
+export async function closePageRequest(sessionId: string, targetId: string): Promise<void> {
+  const response = await fetch('/dsh-browser/pages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, targetId }),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
 }

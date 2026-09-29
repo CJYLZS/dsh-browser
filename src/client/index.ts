@@ -14,10 +14,12 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { SessionIdOf } from '@deepseek-ai/dsh-client-ui-slots'
 import { BrowserBody } from './view.tsx'
 import { BrowserTitle } from './title.tsx'
-import { revealOnBrowserStart } from './reveal.ts'
+import { followBrowserPages } from './reveal.ts'
 import { BrowserSettingsSection } from './settings.tsx'
 import type { BrowserSettingsView } from './settings-layout.ts'
-import { BROWSER_ID, browserDefinition } from './definition.ts'
+import { BROWSER_ID, BROWSER_KIND, browserDefinition } from './definition.ts'
+import { markClosing, targetIdOf } from './pages.ts'
+import { closePageRequest } from './api.ts'
 import { BrowserGlyph } from './glyph.ts'
 import { NS, en, zh, type DshBrowserKey } from './locales.ts'
 
@@ -67,9 +69,22 @@ export function apply(ctx: ClientContext): void {
     { name: 'sidebar.right.pane.tab.title', key: BROWSER_ID },
     BrowserTitle,
   )), 'dsh-browser: viewer title')
-  // The browser is the Session's, the pane is the user's: this is what puts one
-  // in front of the other when a tool starts a browser nobody is watching.
-  revealOnBrowserStart(ctx)
+  // The browser is the Session's, and its pages are the user's: this is what
+  // keeps one sidebar tab on every page the browser holds, and no tab on a
+  // page it does not.
+  followBrowserPages(ctx)
+  // Closing a tab is closing the page it mirrored. The kit's own removal path
+  // asks this handler first, which is what makes the rule hold no matter how
+  // the close arrived — the strip's ✕, a menu, or the pane itself.
+  ctx.sidebarRight.registerCloseHandler(BROWSER_KIND, (sessionId, tab) => {
+    const targetId = targetIdOf(tab.contentId)
+    // A tab that names no page (the guide entry's) has nothing to close.
+    if (targetId === undefined) return
+    markClosing(sessionId, targetId)
+    // The tab is going away either way; the close travels on its own, and a
+    // close that never lands brings the tab back on a later look.
+    void closePageRequest(sessionId, targetId).catch(() => {})
+  })
   // The page appears only while the Host serves this namespace: a deployment
   // that never loaded the plugin's host half has no configuration to edit, so
   // the page registers nothing and the tab shows no trace of it.

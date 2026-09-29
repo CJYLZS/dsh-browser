@@ -1,97 +1,115 @@
 /**
- * Bring the browser's pane forward when a browser starts for the Session on
- * screen.
+ * Keep the Sidebar's browser tabs matched to the browser's pages.
  *
- * The browser belongs to the Session, not to the pane. An agent that starts one
- * while nobody is watching drives a page the user cannot see, and its results
- * ("Clicked link …", a screenshot) land in a conversation beside an empty
- * column. So the client half watches the host's own status route and, the moment
- * the mounted Session's browser goes from not running to running, opens the pane
- * for it — and opening a tab expands the column in the same step, so the
- * Sidebar comes up already showing the page.
+ * The browser belongs to the Session; its pages belong to the user's eyes. A
+ * link that opens a tab, a `window.open`, a page that closes itself — each one
+ * changes a page set the user cannot see anywhere else, and a sidebar that
+ * stayed as it was would show a browser the user cannot recognize: tabs for
+ * pages that are gone, no tab for the page that just came up. So the client
+ * half reads the host's report on a fixed beat and reconciles every session it
+ * names: one tab per page the browser holds, named by the page's CDP target id,
+ * and none for a page it does not.
  *
- * What it watches for is a *change*, not a state. A browser that was already
- * running when the pane was closed stays closed: closing the observer is not a
- * request to open it again, and neither is switching Sidebar tabs. A browser the
- * user stopped comes back only when something asks for one — the next tool call,
- * or the restart control — and that is a change again, so the pane returns with
- * it.
+ * Closing follows the same rule in reverse, and it is why the match can be
+ * unconditional: closing a tab closes that tab's page (the close handler asks
+ * the host), so a tab the user closed is a page that is gone — there is no
+ * state where the sidebar shows less than the browser and something must put
+ * it back. The one race — the report still listing a page whose close was just
+ * asked for — is what the closing ledger is for.
  *
- * The route is polled rather than pushed because this half has no channel of its
- * own to the host: the viewer socket exists only once the pane is open, which is
- * exactly the case this is about.
+ * The route is polled rather than pushed because this half has no channel of
+ * its own to the host: the viewer socket exists only once a pane is open, and
+ * most of the changes this follows happen with every pane closed.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
-import { browserStatus, type ClientBrowserState } from './api.ts'
+import { browserStatus, type ClientBrowserStatus } from './api.ts'
 import { BROWSER_KIND } from './definition.ts'
+import {
+  isClosing,
+  pageAddressOf,
+  publishPageFacts,
+  reconcile,
+  settleClosing,
+  targetIdOf,
+  type ActualTab,
+} from './pages.ts'
 
-/** How long the pane waits between looks at the host's browser state. */
+/** How long the loop waits between looks at the host's browser state. */
 const POLL_MS = 1500
 
 /**
- * Whether a browser is up and asking to be watched.
- * @param state - the reported state, or `undefined` while the Session has no browser.
- * @returns whether a browser is starting or running.
+ * Read the host's report once and bring every named session's tabs in line
+ * with its pages.
+ * @param ctx - client context carrying the Sidebar's navigation face.
+ * @param report - what the host last answered.
  */
-function running(state: ClientBrowserState | undefined): boolean {
-  return state === 'starting' || state === 'ready'
+export function followOneReport(ctx: ClientContext, report: { readonly instances: readonly ClientBrowserStatus[] }): void {
+  // The chips' facts are for every session the host named: a tab in a session
+  // the user is only about to visit shows its page's title all the same.
+  const facts: [string, { title: string; url: string }][] = []
+  /** The pages each session holds, by session id. */
+  const wanted = new Map<string, string[]>()
+  for (const instance of report.instances) {
+    const addresses: string[] = []
+    for (const tab of instance.tabs ?? []) {
+      if (tab.targetId === undefined) continue
+      const address = pageAddressOf(tab.targetId)
+      addresses.push(address)
+      facts.push([address, { title: tab.title ?? '', url: tab.url }])
+    }
+    wanted.set(instance.sessionId, addresses)
+  }
+  publishPageFacts(facts)
+  // A close that has answered is no longer a reason to hold a tab back.
+  const listed: (readonly [string, string])[] = []
+  for (const instance of report.instances) {
+    for (const tab of instance.tabs ?? []) {
+      if (tab.targetId !== undefined) listed.push([instance.sessionId, tab.targetId])
+    }
+  }
+  settleClosing(listed, Date.now())
+
+  for (const [sessionId, addresses] of wanted) {
+    const actual: ActualTab[] = ctx.sidebarRight.openTabs.getSnapshot()
+      .filter(tab => tab.kind === BROWSER_KIND && tab.sessionId === sessionId)
+      .map(tab => ({ id: tab.tabId, contentId: tab.contentId }))
+    const plan = reconcile(addresses, actual)
+    for (const tabId of plan.close) {
+      // A tab that names a page which is gone closes quietly; the close
+      // handler fires for it too, and the host answers "no such page" — which
+      // is exactly the truth, and changes nothing.
+      ctx.sidebarRight.closeIn(sessionId as SessionId, tabId as TabId)
+    }
+    for (const address of plan.open) {
+      const targetId = targetIdOf(address)
+      if (targetId === undefined || isClosing(sessionId, targetId)) continue
+      ctx.sidebarRight.openResourceIn(sessionId as SessionId, address)
+    }
+  }
 }
 
 /**
- * Whether a status change is the moment to bring the pane forward.
- *
- * A Session the route has never reported counts as not running, which is what
- * makes the first tool call of a conversation reveal the browser: the instance
- * appears in the report the moment a tool asks the pool for it. The cost of that
- * choice is that a browser already running when the client loads — a page reload
- * during a long turn — reveals itself too, which is the same story told late.
- * @param previous - the state last reported for this Session.
- * @param next - the state reported now.
- * @returns whether a browser that was not running is running now.
- */
-export function justStarted(
-  previous: ClientBrowserState | undefined,
-  next: ClientBrowserState | undefined,
-): boolean {
-  return !running(previous) && running(next)
-}
-
-/**
- * Follow the host's browser state for the mounted Session, and open the browser's
- * pane when a browser starts.
+ * Follow the host's browser state for as long as the plugin is loaded, and keep
+ * every session's browser tabs matched to its pages.
  * @param ctx - client context carrying the Sidebar's navigation face.
  */
-export function revealOnBrowserStart(ctx: ClientContext): void {
+export function followBrowserPages(ctx: ClientContext): void {
   ctx.effect(() => {
-    /** The state last reported for each Session, so a start is visible as a change. */
-    const seen = new Map<string, ClientBrowserState | undefined>()
     let timer: ReturnType<typeof setInterval> | undefined
     let looking = false
     let stopped = false
 
-    /** Whether the mounted Session already shows this browser in its pane. */
-    const watched = (sessionId: SessionId): boolean =>
-      ctx.sidebarRight.tabsIn(sessionId).some(tab => tab.kind === BROWSER_KIND)
-
-    /** Read the host's state once, and open the pane if a browser just started. */
+    /** Read the host's state once, and reconcile every session it named. */
     const look = async (): Promise<void> => {
-      const sessionId = ctx.sidebarRight.mounted.getSnapshot()
-      // A pane that is already open needs nothing, and looking while it is open
-      // would only spend a request: what this watches for is a browser starting
-      // behind a closed pane.
-      if (sessionId === undefined || looking || stopped || watched(sessionId)) return
+      if (looking || stopped) return
       looking = true
       try {
         const report = await browserStatus()
         if (stopped) return
-        for (const instance of report.instances) {
-          const previous = seen.get(instance.sessionId)
-          seen.set(instance.sessionId, instance.state)
-          if (instance.sessionId !== sessionId) continue
-          if (justStarted(previous, instance.state)) ctx.sidebarRight.openTabIn(sessionId, BROWSER_KIND)
-        }
+        followOneReport(ctx, report)
       } catch {
         // An unanswered read is not a browser event; the next look tries again.
       } finally {
@@ -104,12 +122,10 @@ export function revealOnBrowserStart(ctx: ClientContext): void {
       timer = setInterval(() => { void look() }, POLL_MS)
       void look()
     }
-    const unsubscribe = ctx.sidebarRight.mounted.subscribe(follow)
     follow()
     return () => {
       stopped = true
-      unsubscribe()
       if (timer !== undefined) clearInterval(timer)
     }
-  }, 'dsh-browser: reveal the pane when a browser starts')
+  }, 'dsh-browser: keep sidebar tabs matched to the browser pages')
 }

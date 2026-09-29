@@ -6,16 +6,27 @@
  * app; this one mirrors a separate browser process over CDP. Sharing the kind
  * would make installing this plugin silently replace that tab with a different
  * capability.
+ *
+ * A tab of this kind is addressed by the page it mirrors: one tab per browser
+ * page, its address built from the page's CDP target id, so opening the same
+ * page again reveals the tab that is already there and a tab survives a client
+ * reload still pointing at its page. The guide entry stays a page-type open —
+ * it is the one way to start a browser nobody is watching yet — and hands over
+ * to the per-page tabs once pages exist.
  */
 import type { ComponentType } from 'react'
 import type { SidebarRightTabDefinition } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { IconProps } from '@deepseek-ai/dsh-client-ui-primitives'
+import { PAGE_PREFIX } from './pages.ts'
 
 /** The tab kind this plugin owns. */
 export const BROWSER_KIND = 'cdpBrowser'
 
 /** This implementation's identity: the key its body and title register under. */
 export const BROWSER_ID = 'dsh-browser'
+
+/** The address glob a page tab matches: the page scheme, anything after it. */
+const PAGE_PATTERN = `${PAGE_PREFIX}**`
 
 /**
  * The mirror's registry definition.
@@ -43,6 +54,8 @@ export function browserDefinition(
     kind: BROWSER_KIND,
     priority: 'extension',
     title,
+    patterns: [PAGE_PATTERN],
+    canOpen: address => address.startsWith(PAGE_PREFIX),
     guide: [{ id: BROWSER_ID, order: 40, title: guideTitle, description: guideDescription, icon }],
   }
 }
