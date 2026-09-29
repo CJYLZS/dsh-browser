@@ -424,16 +424,29 @@ test('a browser with a window is not rewritten', async () => {
  * fake tells them apart from the caller's own code, and answers the second with
  * whatever the first was told to observe — a record no armed probe could give
  * is a record the page never made.
+ *
+ * The record is page-supplied, so it is also how a test hands over something a
+ * page should not be able to say: whatever is passed here is what the plugin
+ * has to make sense of.
  * @param page - the page whose CDP session to program.
  * @param mutations - how many mutation records the page is reported to have made.
- * @param settled - whether the page stopped changing inside the budget.
+ * @param extra - what the page says it changed, and how much it left out.
  */
-function observe(page: FakePage, mutations: number, settled = true): void {
-  let seen: { mutations: number; settled: boolean } = { mutations: 0, settled: true }
+function observe(
+  page: FakePage,
+  mutations: number,
+  extra: { settled?: boolean; changes?: readonly unknown[]; omitted?: number } = {},
+): void {
+  let seen: unknown = { mutations: 0, settled: true, changes: [], omitted: 0 }
   page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
     const expression = String(params['expression'])
     if (expression.includes('MutationObserver')) {
-      seen = { mutations, settled }
+      seen = {
+        mutations,
+        settled: extra.settled ?? true,
+        ...extra.changes === undefined ? {} : { changes: extra.changes },
+        ...extra.omitted === undefined ? {} : { omitted: extra.omitted },
+      }
       return { result: { value: 0 } }
     }
     if (expression.includes('__dshSettle')) return { result: { value: seen } }
@@ -559,6 +572,203 @@ test('a click reports the element it acted on, the address it ended on, and what
   assert.equal(report.url, 'about:blank')
 })
 
+test('a click reports what the page changed, not just that it changed', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  observe(page, 3, {
+    changes: [
+      { kind: 'added', tag: 'div', role: 'status', preview: '先在实例表里点一行' },
+      { kind: 'attribute', tag: 'button', preview: '启动并连接', attribute: 'disabled', from: 'true' },
+      { kind: 'text', tag: 'p', from: '24.1k', to: '24.2k' },
+    ],
+  })
+  const report = await browser.click('e2')
+  assert.deepEqual(report.changes, [
+    { kind: 'added', tag: 'div', role: 'status', preview: '先在实例表里点一行' },
+    { kind: 'attribute', tag: 'button', preview: '启动并连接', attribute: 'disabled', from: 'true' },
+    { kind: 'text', tag: 'p', from: '24.1k', to: '24.2k' },
+  ])
+  assert.deepEqual([...report.changed], ['dom'], 'the change list still says the page moved')
+})
+
+test('a result says how many changes it did not itemise', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  observe(page, 9, { changes: [{ kind: 'added', tag: 'li' }], omitted: 8 })
+  const report = await browser.click('e2')
+  assert.equal(report.changesOmitted, 8)
+})
+
+test('a page that changed nothing carries no change list at all', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  observe(page, 0, { changes: [] })
+  const report = await browser.click('e2')
+  assert.ok(!('changes' in report), 'an empty change list is noise on every result')
+  assert.ok(!('changesOmitted' in report))
+})
+
+test('a page cannot invent a change the plugin does not understand', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // The record is page-supplied: whatever a page answers with has to be read as
+  // data. An entry the result schema would not accept is dropped instead of
+  // failing the call, and a field that is not the type it should be is dropped
+  // from an entry that is otherwise usable.
+  observe(page, 4, {
+    changes: [
+      null,
+      'a change',
+      { kind: 'nonsense', tag: 'div' },
+      { kind: 'added', tag: 42, preview: 'kept', extra: 'not in the schema' },
+    ],
+  })
+  const report = await browser.click('e2')
+  assert.deepEqual(report.changes, [{ kind: 'added', preview: 'kept' }])
+})
+
+test('a page cannot widen a change past the fields the result declares', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  observe(page, 20, {
+    changes: [
+      { kind: 'added', tag: 'div', preview: 'x'.repeat(500) },
+      ...Array.from({ length: 9 }, () => ({ kind: 'removed', tag: 'li' })),
+    ],
+    omitted: 2,
+  })
+  const report = await browser.click('e2')
+  assert.equal(report.changes?.length, 5, 'the cap is enforced by the plugin, not promised by the page')
+  const first = report.changes?.[0]
+  assert.equal(first?.preview?.length, 61)
+  assert.ok(first?.preview?.endsWith('…'))
+  assert.equal(report.changesOmitted, 2 + 5, 'the entries past the cap are counted as omitted')
+})
+
+test('a wait stops as soon as the page matches, not when the budget runs out', async () => {
+  const { browser, page } = await started()
+  // The page answers with nothing twice and then with the tree. A wait is what
+  // makes "it is not there yet" a different answer from "it is not there", and
+  // only a wait that asks again can tell them apart.
+  let reads = 0
+  page.cdp.answers.set('Accessibility.getFullAXTree', () => {
+    reads += 1
+    return reads < 3 ? { nodes: [] } : AX_TREE
+  })
+  const report = await browser.wait({ locator: { text: 'Send' } }, { timeoutMs: 1_000, pollMs: 1 })
+  assert.equal(report.matched, true)
+  assert.deepEqual(report.element, { role: 'button', name: 'Send' })
+  assert.equal(report.matches, 1)
+  assert.ok(reads >= 3, `the wait asked the page ${String(reads)} time(s)`)
+  assert.ok(report.waitedMs < 1_000, 'the wait spent its whole budget although the page matched early')
+})
+
+test('a wait that never matches reports the wait instead of failing', async () => {
+  const { browser, page } = await started()
+  let reads = 0
+  page.cdp.answers.set('Accessibility.getFullAXTree', () => {
+    reads += 1
+    return { nodes: [] }
+  })
+  const report = await browser.wait({ locator: { text: 'never' } }, { timeoutMs: 30, pollMs: 1 })
+  assert.equal(report.matched, false, 'a condition that has not held yet is a result, not an error')
+  assert.ok(report.waitedMs >= 30, `it waited ${String(report.waitedMs)} ms of a 30 ms budget`)
+  assert.ok(reads >= 2, 'the page was only asked once')
+  assert.equal(report.url, 'about:blank')
+  assert.equal(typeof report.title, 'string')
+})
+
+test('a wait on an address reads the address the page shows', async () => {
+  const { browser, page } = await started()
+  page.url = 'https://example.test/engine/READY'
+  const report = await browser.wait({ url: 'engine/ready' }, { timeoutMs: 100, pollMs: 1 })
+  assert.equal(report.matched, true)
+  assert.equal(report.url, 'https://example.test/engine/READY')
+  assert.equal(report.element, undefined, 'an address condition names no element')
+  assert.deepEqual(page.cdp.method('Accessibility.getFullAXTree'), [], 'an address needs no tree')
+})
+
+test('a wait on an address that never arrives runs out of time', async () => {
+  const { browser } = await started()
+  const report = await browser.wait({ url: 'never-here' }, { timeoutMs: 20, pollMs: 1 })
+  assert.equal(report.matched, false)
+})
+
+test('a fixed wait is a wait with nothing to observe', async () => {
+  const { browser, page } = await started()
+  const report = await browser.wait({ timeMs: 20 }, { timeoutMs: 1_000, pollMs: 1 })
+  assert.equal(report.matched, true)
+  assert.ok(report.waitedMs >= 20, `it waited ${String(report.waitedMs)} ms`)
+  assert.deepEqual(page.cdp.method('Accessibility.getFullAXTree'), [], 'a fixed wait asked the page a question')
+})
+
+test('a wait refuses to start on a page that is not open', async () => {
+  const { browser } = harness()
+  await assert.rejects(
+    () => browser.wait({ url: 'ready' }, { timeoutMs: 50 }),
+    /nothing is open to wait on/,
+  )
+})
+
+test('a wait carries what the page changed while it waited', async () => {
+  const { browser, page } = await started()
+  observe(page, 2, {
+    changes: [{ kind: 'added', tag: 'div', role: 'status', preview: 'engine starting' }],
+  })
+  page.cdp.answers.set('Accessibility.getFullAXTree', { nodes: [] })
+  const report = await browser.wait({ locator: { text: 'ready' } }, { timeoutMs: 20, pollMs: 1 })
+  assert.equal(report.matched, false)
+  assert.deepEqual(report.changes, [
+    { kind: 'added', tag: 'div', role: 'status', preview: 'engine starting' },
+  ], 'what the page did while the caller waited is the answer to "why is it not ready"')
+})
+
+test('a selector the page refuses fails the wait instead of polling a typo', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 7 } })
+  page.cdp.failWith('DOM.querySelectorAll', 'SyntaxError: not a valid selector')
+  await assert.rejects(
+    () => browser.wait({ locator: { selector: '$$$' } }, { timeoutMs: 20, pollMs: 1 }),
+    /refused the selector/,
+  )
+  assert.equal(page.cdp.method('DOM.querySelectorAll').length, 1, 'the page was asked the same typo again')
+})
+
+test('a wait that matches several elements says how many', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Accessibility.getFullAXTree', {
+    nodes: [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Form' }, childIds: ['2', '3'] },
+      { nodeId: '2', role: { value: 'button' }, name: { value: 'Start' }, backendDOMNodeId: 41 },
+      { nodeId: '3', role: { value: 'button' }, name: { value: 'Start over' }, backendDOMNodeId: 42 },
+    ],
+  })
+  const report = await browser.wait({ locator: { role: 'button', name: 'Start' } }, { timeoutMs: 100, pollMs: 1 })
+  assert.equal(report.matched, true, 'the condition is "such an element is there", and two of them are')
+  assert.equal(report.matches, 2, 'the count is what tells the caller a click would be refused as ambiguous')
+  assert.deepEqual(report.element, { role: 'button', name: 'Start' })
+})
+
+test('a wait matches the element, not the text run inside it', async () => {
+  const { browser, page } = await started()
+  // The shape a real page produced on 2026-09-29: a button takes its accessible
+  // name from its own contents, so the element and the text run under it say the
+  // same words. A wait that answered with the run would report something nobody
+  // can act on, and one that counted two would report an ambiguity that is not
+  // there — and the click that follows would be refused for it.
+  page.cdp.answers.set('Accessibility.getFullAXTree', {
+    nodes: [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Wait' }, childIds: ['2'] },
+      { nodeId: '2', role: { value: 'button' }, name: { value: 'engine ready' }, backendDOMNodeId: 70, childIds: ['2a'] },
+      { nodeId: '2a', role: { value: 'StaticText' }, name: { value: 'engine ready' }, backendDOMNodeId: 71 },
+    ],
+  })
+  const report = await browser.wait({ locator: { text: 'engine ready' } }, { timeoutMs: 200, pollMs: 1 })
+  assert.equal(report.matched, true)
+  assert.equal(report.matches, 1)
+  assert.deepEqual(report.element, { role: 'button', name: 'engine ready' })
+})
+
 test('a click that navigates reports the address it landed on, not the one it left', async () => {
   const { browser, page } = await started()
   await browser.snapshot()
@@ -654,7 +864,7 @@ test('typing reports the element it typed into', async () => {
 test('an action the page never answered reports that it could not settle', async () => {
   const { browser, page } = await started()
   await browser.snapshot()
-  observe(page, 0, false)
+  observe(page, 0, { settled: false })
   const report = await browser.click('e2')
   assert.equal(report.settled, false)
   assert.deepEqual([...report.changed], [])
@@ -733,6 +943,34 @@ test('a declaration the page already has is retried in a scope of its own', asyn
   const calls = page.cdp.method('Runtime.evaluate')
   assert.equal(calls.length, 2, 'the redeclaration must be retried, not reported')
   assert.match(String(calls[1]?.params['expression']), /^\{\n/)
+})
+
+test('a top-level return is retried as an async function body', async () => {
+  const { browser, page } = await started()
+  // What "run this and give me what it returns" gets on a page: a bare `return`
+  // is a statement where only an expression is allowed, so the page refuses the
+  // whole snippet before anything runs — while the reference runtime's program
+  // form allows exactly this.
+  page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => (
+    String(params['expression']).startsWith('(async () =>')
+      ? { result: { value: 'returned' } }
+      : { exceptionDetails: { exception: { description: 'SyntaxError: Illegal return statement' } } }
+  ))
+  assert.equal(await browser.evaluate('const el = document.body; return el.textContent'), 'returned')
+  const calls = page.cdp.method('Runtime.evaluate')
+  assert.equal(calls.length, 2, 'a top-level return must be retried, not reported')
+  assert.equal(calls[1]?.params['expression'], '(async () => {\nconst el = document.body; return el.textContent\n})()')
+})
+
+test('a top-level return is retried once, not in a loop', async () => {
+  const { browser, page } = await started()
+  // The wrapper is the retry, so a page that refuses the wrapped form too has
+  // said something about the code; reporting it beats wrapping it again.
+  page.cdp.answers.set('Runtime.evaluate', {
+    exceptionDetails: { exception: { description: 'SyntaxError: Illegal return statement' } },
+  })
+  await assert.rejects(() => browser.evaluate('return 1'), /Illegal return statement/)
+  assert.equal(page.cdp.method('Runtime.evaluate').length, 2, 'the wrapped form was retried more than once')
 })
 
 test('a cancelled call stops the page instead of leaving it busy', async () => {
@@ -924,4 +1162,339 @@ test('a page with nothing selected reports no text', async () => {
   // "undefined" on the user's clipboard.
   page.cdp.answers.set('Runtime.evaluate', { result: {} })
   assert.equal(await browser.selectionText(), '')
+})
+
+/**
+ * A page with the shape a ref cannot express: one control name used twice, in
+ * two places that only their ancestors tell apart.
+ */
+const AMBIGUOUS_TREE = {
+  nodes: [
+    { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Instances' }, childIds: ['2', '3'] },
+    { nodeId: '2', role: { value: 'region' }, name: { value: 'Running' }, childIds: ['2a'] },
+    { nodeId: '2a', role: { value: 'button' }, name: { value: 'Stop' }, backendDOMNodeId: 61 },
+    { nodeId: '3', role: { value: 'region' }, name: { value: 'Idle' }, childIds: ['3a'] },
+    { nodeId: '3a', role: { value: 'button' }, name: { value: 'Stop' }, backendDOMNodeId: 62 },
+  ],
+}
+
+/**
+ * Answer the DOM calls a CSS selector resolution makes.
+ *
+ * A node id doubles as the backend node id here, which is what maps a match
+ * back to the accessibility tree the tree-shaped assertions use.
+ * @param page - the fake page to answer on.
+ * @param matches - selector to the node ids it matches; an absent selector matches nothing.
+ */
+function answerSelectors(page: FakePage, matches: Record<string, number[]>): void {
+  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 1 } })
+  page.cdp.answers.set('DOM.querySelectorAll', (params: Record<string, unknown>) => ({
+    nodeIds: matches[String(params['selector'])] ?? [],
+  }))
+  page.cdp.answers.set('DOM.describeNode', (params: Record<string, unknown>) => ({
+    node: { backendNodeId: params['nodeId'] },
+  }))
+}
+
+test('a role-and-name locator clicks the element the matching ref named', async () => {
+  const byRef = await started()
+  await byRef.browser.snapshot()
+  await byRef.browser.click('e2')
+
+  const byLocator = await started()
+  const report = await byLocator.browser.click({ role: 'button', name: 'Send' })
+
+  assert.deepEqual(pointerCalls(byLocator.page), pointerCalls(byRef.page), 'the two ways to name one element pressed different points')
+  assert.deepEqual(report.element, { role: 'button', name: 'Send' })
+})
+
+test('a locator that matches two elements refuses instead of choosing one', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Accessibility.getFullAXTree', AMBIGUOUS_TREE)
+  await assert.rejects(() => browser.click({ role: 'button', name: 'Stop' }), (error: Error) => {
+    assert.match(error.message, /matches 2 elements/)
+    // The ancestors are the whole point of the refusal: without them the list
+    // is two identical lines and the caller has learned nothing.
+    assert.match(error.message, /region "Running"/)
+    assert.match(error.message, /region "Idle"/)
+    return true
+  })
+  assert.deepEqual(pointerCalls(page), [], 'an ambiguous locator clicked something')
+})
+
+test('a locator the page does not answer refuses and points at the snapshot', async () => {
+  const { browser, page } = await started()
+  await assert.rejects(
+    () => browser.click({ role: 'button', name: 'Nope' }),
+    /no element matches button "Nope"; check it, or call browser_snapshot/,
+  )
+  assert.deepEqual(pointerCalls(page), [])
+})
+
+test('a CSS selector finds the element at the moment of the action', async () => {
+  const { browser, page } = await started()
+  answerSelectors(page, { '#send': [31] })
+  const report = await browser.click({ selector: '#send' })
+  assert.deepEqual(report.element, { role: 'button', name: 'Send' })
+  assert.equal(page.cdp.method('Input.dispatchMouseEvent').length, 3)
+})
+
+test('a selector that matches nothing is reported by the selector', async () => {
+  const { browser, page } = await started()
+  answerSelectors(page, {})
+  await assert.rejects(() => browser.click({ selector: '#gone' }), /no element matches selector "#gone"/)
+  assert.deepEqual(pointerCalls(page), [])
+})
+
+test('a selector that matches several elements refuses and lists them', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Accessibility.getFullAXTree', AMBIGUOUS_TREE)
+  answerSelectors(page, { button: [61, 62] })
+  await assert.rejects(() => browser.click({ selector: 'button' }), /selector "button" matches 2 elements/)
+  assert.deepEqual(pointerCalls(page), [])
+})
+
+test('a selector reaches an element the accessibility tree does not describe', async () => {
+  const { browser, page } = await started()
+  answerSelectors(page, { '#bare': [99] })
+  // After the helper, which sets a generic `DOM.describeNode`: this is the
+  // element the tree has no node for, so the tag is the only name there is.
+  page.cdp.answers.set('DOM.describeNode', () => ({ node: { backendNodeId: 99, nodeName: 'DIV' } }))
+  const report = await browser.click({ selector: '#bare' })
+  assert.equal(report.element?.role, 'div')
+})
+
+test('a selector the page rejects is reported as a bad selector, not as an empty page', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 1 } })
+  page.cdp.failWith('DOM.querySelectorAll', 'DOM Error while querying: "#1bad" is not a valid selector')
+  // "no element matches" would send the caller looking for another element when
+  // what is wrong is the question.
+  await assert.rejects(() => browser.click({ selector: '#1bad' }), /refused the selector|not a valid selector/)
+})
+
+test('a locator is resolved when the action runs, so a navigation does not invalidate it', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  await browser.navigate('https://example.test/next')
+  // A ref names the document it was minted in, and that document is gone…
+  await assert.rejects(() => browser.click('e2'), /not a ref from a snapshot of the current page/)
+  // …while a locator asks the page in front of it, so no second snapshot is
+  // needed. This is the friction a ref-only surface could not answer.
+  await browser.click({ role: 'button', name: 'Send' })
+  assert.equal(page.cdp.method('Input.dispatchMouseEvent').length, 3)
+})
+
+test('a locator types into the element it names', async () => {
+  const { browser, page } = await started()
+  await browser.type({ role: 'textbox', name: 'Email' }, 'a@b.c')
+  assert.deepEqual(page.cdp.method('DOM.focus')[0]?.params, { backendNodeId: 21 })
+  assert.deepEqual(page.cdp.method('Input.insertText')[0]?.params, { text: 'a@b.c' })
+})
+
+test('a click blocked by a nameless element still says something actionable', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // Measured 2026-09-24: an SVG icon over a control answers with a role and no
+  // name at all, and `svg ""` names nothing the caller can act on.
+  page.cdp.answers.set('Runtime.callFunctionOn', {
+    result: { value: { ok: true, x: 20, y: 30, moved: false, inView: true, mine: false, over: { role: 'svg', name: '' } } },
+  })
+  await assert.rejects(() => browser.click('e2'), (error: Error) => {
+    assert.doesNotMatch(error.message, /""/, 'a nameless element was quoted as an empty name')
+    assert.match(error.message, /svg/)
+    assert.match(error.message, /force: true/)
+    return true
+  })
+})
+
+test('the console listener is subscribed before the page can say anything', async () => {
+  const { browser, page } = await started()
+  // Subscribing at attach time is the whole point: a script that throws while
+  // the document loads has already thrown before any tool could ask, so a
+  // listener installed by a tool would only ever see a quiet page.
+  const enabled = page.cdp.calls
+    .filter(call => call.method === 'Runtime.enable' || call.method === 'Log.enable')
+    .map(call => call.method)
+  assert.deepEqual(enabled.sort(), ['Log.enable', 'Runtime.enable'])
+  assert.equal(browser.status().state, 'ready')
+  // And asking before anything was said is an empty history, not a failure.
+  const report = await browser.pageConsole()
+  assert.deepEqual(report.entries, [])
+  assert.equal(report.total, 0)
+})
+
+test('a console call, an uncaught error, and a browser log entry each arrive as one entry', async () => {
+  const { browser, page } = await started()
+  page.cdp.emit('Runtime.consoleAPICalled', {
+    type: 'error',
+    timestamp: 1_700_000_000_000,
+    args: [{ type: 'string', value: 'checkout failed' }, { type: 'object', description: 'Object', preview: { description: 'Object', properties: [{ name: 'code', type: 'number', value: 500 }] } }],
+    stackTrace: { callFrames: [{ url: 'https://example.test/app.js', lineNumber: 11 }] },
+  })
+  page.cdp.emit('Runtime.exceptionThrown', {
+    timestamp: 1_700_000_001_000,
+    exceptionDetails: {
+      text: 'Uncaught',
+      url: 'https://example.test/app.js',
+      lineNumber: 20,
+      exception: { description: 'TypeError: x is not a function' },
+    },
+  })
+  page.cdp.emit('Log.entryAdded', {
+    entry: {
+      source: 'network',
+      level: 'error',
+      text: 'Failed to load resource: the server responded with a status of 404',
+      timestamp: 1_700_000_002_000,
+      url: 'https://example.test/missing.js',
+    },
+  })
+  const report = await browser.pageConsole()
+  assert.equal(report.total, 3)
+  assert.deepEqual(report.entries.map(entry => entry.level), ['error', 'error', 'error'])
+  assert.equal(report.entries[0]?.message, 'checkout failed {code: 500}')
+  assert.equal(report.entries[0]?.url, 'https://example.test/app.js:12')
+  assert.equal(report.entries[1]?.message, 'TypeError: x is not a function')
+  assert.equal(report.entries[1]?.url, 'https://example.test/app.js:21')
+  // A failed request has no line to name, so the resource is the whole answer.
+  assert.equal(report.entries[2]?.url, 'https://example.test/missing.js')
+  assert.match(report.entries[2]?.message ?? '', /404/)
+  assert.equal(report.entries[0]?.timestamp, new Date(1_700_000_000_000).toISOString())
+})
+
+test('a level the browser spells differently is normalized, and the rest reads as log', async () => {
+  const { browser, page } = await started()
+  for (const [type, expected] of [['warning', 'warn'], ['verbose', 'debug'], ['table', 'log']] as const) {
+    page.cdp.emit(type === 'verbose'
+      ? 'Log.entryAdded'
+      : 'Runtime.consoleAPICalled', type === 'verbose'
+      ? { entry: { level: type, text: 'a network detail', timestamp: 1_700_000_000_000 } }
+      : { type, timestamp: 1_700_000_000_000, args: [{ type: 'string', value: 'said' }] })
+    const report = await browser.pageConsole()
+    assert.equal(report.entries.at(-1)?.level, expected, `${type} was not normalized`)
+  }
+})
+
+test('the console can be narrowed by level and by a substring', async () => {
+  const { browser, page } = await started()
+  for (const [level, message] of [['log', 'booting'], ['warn', 'slow response'], ['error', 'booting failed']] as const) {
+    page.cdp.emit('Runtime.consoleAPICalled', { type: level, timestamp: 1_700_000_000_000, args: [{ type: 'string', value: message }] })
+  }
+  assert.deepEqual((await browser.pageConsole({ levels: ['error'] })).entries.map(entry => entry.message), ['booting failed'])
+  assert.deepEqual((await browser.pageConsole({ filter: 'BOOT' })).entries.map(entry => entry.message), ['booting', 'booting failed'])
+  // A filter and a level are one question asked twice, not a union.
+  const both = await browser.pageConsole({ levels: ['warn'], filter: 'boot' })
+  assert.deepEqual(both.entries, [])
+  assert.equal(both.total, 3)
+  assert.equal(both.matched, 0)
+})
+
+test('a limit keeps the newest entries, and says how many matched', async () => {
+  const { browser, page } = await started()
+  for (let index = 0; index < 5; index += 1) {
+    page.cdp.emit('Runtime.consoleAPICalled', { type: 'log', timestamp: 1_700_000_000_000, args: [{ type: 'string', value: `line ${String(index)}` }] })
+  }
+  const report = await browser.pageConsole({ limit: 2 })
+  // The last thing a page said before it went quiet is what explains the quiet.
+  assert.deepEqual(report.entries.map(entry => entry.message), ['line 3', 'line 4'])
+  assert.equal(report.matched, 5)
+  assert.equal(report.total, 5)
+})
+
+test('a new document starts with an empty console, and an embedded frame does not clear it', async () => {
+  const { browser, page } = await started()
+  page.cdp.emit('Runtime.consoleAPICalled', { type: 'error', timestamp: 1_700_000_000_000, args: [{ type: 'string', value: 'before' }] })
+  assert.equal((await browser.pageConsole()).total, 1)
+  // An iframe navigating on its own has not replaced the document the caller is
+  // reading, so the document's own console is still the document's.
+  page.emit('framenavigated', { url: () => 'https://ads.example.test/frame' })
+  assert.equal((await browser.pageConsole()).total, 1)
+  page.emit('framenavigated', page.frame)
+  const after = await browser.pageConsole()
+  assert.equal(after.total, 0)
+  assert.deepEqual(after.entries, [])
+})
+
+test('a page that logs in a loop fills the buffer, and the count says so', async () => {
+  const { browser, page } = await started()
+  for (let index = 0; index < 205; index += 1) {
+    page.cdp.emit('Runtime.consoleAPICalled', { type: 'log', timestamp: 1_700_000_000_000, args: [{ type: 'string', value: `tick ${String(index)}` }] })
+  }
+  const report = await browser.pageConsole({ limit: 1 })
+  assert.equal(report.total, 200, 'the buffer grew past its bound')
+  assert.equal(report.dropped, 5)
+  // The oldest were dropped, so the newest is the last thing said.
+  assert.equal(report.entries[0]?.message, 'tick 204')
+})
+
+test('reading a console with nothing open is refused, and does not start a browser', async () => {
+  const { browser, launch } = harness()
+  await assert.rejects(() => browser.pageConsole(), /nothing is open to read a console from/)
+  assert.equal(launch.browsers.length, 0, 'asking about the console started a browser')
+})
+
+test('a viewport capture asks for no clip and reports the viewport it was taken at', async () => {
+  const { browser, page } = await started()
+  const shot = await browser.screenshot()
+  assert.deepEqual(shot.width, 1280)
+  assert.deepEqual(shot.height, 720)
+  assert.equal(shot.element, undefined)
+  const asked = page.cdp.method('Page.captureScreenshot')[0]?.params
+  assert.equal(asked?.['clip'], undefined, 'a viewport capture asked for a clip')
+  assert.equal(asked?.['captureBeyondViewport'], undefined)
+})
+
+test('a whole-page capture clips to the document and reaches past the viewport', async () => {
+  const { browser, page } = await started()
+  const shot = await browser.screenshot({ fullPage: true })
+  // Measured 2026-09-29 in `.prove/clip-space-probe.mjs`: a clip is in the
+  // page's own pixels, and only `captureBeyondViewport` makes Chrome render the
+  // part of the page the window is not showing.
+  assert.deepEqual(page.cdp.method('Page.captureScreenshot')[0]?.params['clip'], {
+    x: 0,
+    y: 0,
+    width: 1280,
+    height: 1440,
+    scale: 1,
+  })
+  assert.equal(page.cdp.method('Page.captureScreenshot')[0]?.params['captureBeyondViewport'], true)
+  assert.equal(shot.width, 1280)
+  assert.equal(shot.height, 1440, 'a full-page capture reported the viewport height')
+})
+
+test('an element capture clips to the element, without scrolling the page', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.answers.set('Runtime.callFunctionOn', (params: Record<string, unknown>) => {
+    // The first call is the clip probe, which asks for a box rather than a press.
+    return String(params['functionDeclaration']).includes('getBoundingClientRect') && String(params['functionDeclaration']).includes('scrollX')
+      ? { result: { value: { ok: true, x: 12.4, y: 2601.7, width: 120.2, height: 44.9 } } }
+      : { result: { value: PRESS } }
+  })
+  const shot = await browser.screenshot({ target: 'e2' })
+  assert.deepEqual(page.cdp.method('Page.captureScreenshot')[0]?.params['clip'], {
+    // Floored at the corner and ceiled at the far edge, so the clip can only grow
+    // beyond the element rather than cut a pixel off it.
+    x: 12,
+    y: 2601,
+    width: 121,
+    height: 45,
+    scale: 1,
+  })
+  assert.deepEqual(shot.element, { role: 'button', name: 'Send' })
+  assert.equal(shot.width, 121)
+  assert.equal(shot.height, 45)
+  // The element is far below the fold, and nothing scrolled to reach it: a clip
+  // is in page pixels, so scrolling would be a change the page can react to for
+  // no reason at all.
+  assert.deepEqual(page.cdp.method('DOM.scrollIntoViewIfNeeded'), [])
+})
+
+test('an element with no box is refused rather than captured as a blank rectangle', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { ok: false } } })
+  await assert.rejects(() => browser.screenshot({ target: 'e2' }), /has no visible box/)
+  assert.deepEqual(page.cdp.method('Page.captureScreenshot'), [])
 })

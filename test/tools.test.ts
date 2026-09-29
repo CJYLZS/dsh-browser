@@ -9,8 +9,12 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { actionText, changedText, snapshotText, tabsText } from '../src/tools/index.ts'
+import { actionText, changedText, changesText, consoleText, evaluateText, readable, shotBlocks, shotText, snapshotText, tabsText, waitText } from '../src/tools/index.ts'
 import type { ActionReport, TabSummary } from '../src/browser/session-browser.ts'
+import type { ImageRef } from '../src/tools/attach.ts'
+
+/** The image reference a fake attachment store hands back. */
+const REF: ImageRef = { attachmentId: 'att-1', mediaType: 'image/jpeg', bytes: 100, width: 10, height: 10 }
 
 /** The pages a result carries, with the second one active. */
 const TABS: TabSummary[] = [
@@ -35,7 +39,12 @@ function report(report: Partial<ActionReport> = {}): ActionReport {
 }
 
 test('an action that changed nothing says so rather than leaving it to be guessed', () => {
-  assert.equal(changedText(report()), 'The page did not change.')
+  const text = changedText(report())
+  assert.match(text, /^The page did not change\./)
+  // The line a model gets wrong most expensively: "did not change" invites a
+  // second identical press, so the sentence says what it is evidence *of*.
+  assert.match(text, /not a verdict on the action/)
+  assert.match(text, /look further rather than pressing again/)
 })
 
 test('an action that changed the page names what changed', () => {
@@ -103,6 +112,108 @@ test('a typed result names the text and the element it went into', () => {
     TABS,
   )
   assert.match(text, /^Typed "a@b\.c" into textbox "Email"\./)
+})
+
+test('a result lists what the page changed, in the words the page used', () => {
+  assert.equal(
+    changesText([
+      { kind: 'added', tag: 'div', role: 'status', preview: '先在实例表里点一行' },
+      { kind: 'attribute', tag: 'button', preview: '启动并连接', attribute: 'disabled', from: 'true' },
+      { kind: 'text', tag: 'p', from: '24.1k', to: '24.2k' },
+      { kind: 'removed', tag: 'li', preview: '已连接的实例' },
+    ], 0),
+    'dom: +1 status "先在实例表里点一行"; ~ button "启动并连接" disabled: "true" → (none); '
+    + '~ p "24.1k" → "24.2k"; -1 li "已连接的实例"',
+  )
+})
+
+test('a change with nothing to say is just its direction and its element', () => {
+  assert.equal(changesText([{ kind: 'added', tag: 'span' }], 0), 'dom: +1 span')
+  assert.equal(
+    changesText([{ kind: 'attribute', tag: 'button', preview: 'Save', attribute: 'disabled' }], 0),
+    'dom: ~ button "Save" disabled: (none) → (none)',
+    'an attribute with no value either side still says which attribute moved',
+  )
+})
+
+test('changes a result could not fit are counted where they were left out', () => {
+  assert.equal(
+    changesText([{ kind: 'added', tag: 'li' }], 1),
+    'dom: +1 li; and 1 more change',
+  )
+  assert.match(changesText([{ kind: 'added', tag: 'li' }], 4), /and 4 more changes$/)
+})
+
+test('a result with no changes says nothing about changes', () => {
+  assert.equal(changesText([], 0), '')
+})
+
+test('a result carries the change list under the outcome line', () => {
+  const text = actionText('Clicked button "Send"', report({
+    changed: ['dom'],
+    mutations: 1,
+    changes: [{ kind: 'added', tag: 'div', role: 'status', preview: 'Saved' }],
+  }), TABS)
+  assert.match(text, /\nThe page changed: dom\.\ndom: \+1 status "Saved"\n/)
+})
+
+test('a wait result says it matched, and what matched', () => {
+  assert.equal(
+    waitText({ text: 'Send' }, {
+      matched: true, waitedMs: 320, url: 'https://example.test/form', title: 'Form',
+      element: { role: 'button', name: 'Send' }, matches: 1, tabs: TABS,
+    }),
+    [
+      'Waited 0.3 s — button "Send" is on the page.',
+      'Page: https://example.test/form — "Form"',
+      '',
+      '[0] https://example.test/first',
+      '[active] https://example.test/second',
+    ].join('\n'),
+  )
+})
+
+test('a wait that matched several elements says a click on them would be refused', () => {
+  const text = waitText({ role: 'button', name: 'Start' }, {
+    matched: true, waitedMs: 5_000, url: 'https://example.test/form', title: 'Form',
+    element: { role: 'button', name: 'Start' }, matches: 3, tabs: TABS,
+  })
+  assert.match(text, /^Waited 5\.0 s — 3 elements match/)
+  assert.match(text, /ambiguous/)
+})
+
+test('a wait that ran out of time says so and points at the snapshot', () => {
+  const text = waitText({ text: 'ready' }, {
+    matched: false, waitedMs: 10_000, url: 'https://example.test/form', title: 'Form', tabs: TABS,
+  })
+  assert.match(text, /^Waited 10\.0 s and nothing matched text "ready"; take a browser_snapshot/)
+})
+
+test('a wait on an address and a fixed wait each say what they waited for', () => {
+  assert.match(
+    waitText({ url: 'ready' }, {
+      matched: true, waitedMs: 1_000, url: 'https://example.test/ready', title: 'Ready', tabs: TABS,
+    }),
+    /^Waited 1\.0 s — the address contains "ready"\./,
+  )
+  assert.match(
+    waitText({ time: 8_000 }, {
+      matched: true, waitedMs: 8_000, url: 'https://example.test/form', title: 'Form', tabs: TABS,
+    }),
+    /^Waited 8\.0 s \(a fixed wait\)\./,
+  )
+})
+
+test('a wait result carries what the page changed while it waited', () => {
+  const text = waitText({ text: 'ready' }, {
+    matched: false,
+    waitedMs: 10_000,
+    url: 'https://example.test/form',
+    title: 'Form',
+    changes: [{ kind: 'added', tag: 'div', role: 'status', preview: 'engine starting' }],
+    tabs: TABS,
+  })
+  assert.match(text, /\ndom: \+1 status "engine starting"\n/)
 })
 
 test('a snapshot result is headed by where in the page it was taken', () => {
@@ -176,6 +287,117 @@ test('a result that met no dialog says nothing about dialogs', () => {
   assert.doesNotMatch(text, /dialog/)
 })
 
+test('a console result lists what the page said, oldest first, with where it came from', () => {
+  const text = consoleText({
+    entries: [
+      { level: 'log', message: 'booting', timestamp: '2026-09-29T10:00:00.000Z' },
+      {
+        level: 'error',
+        message: 'TypeError: save is not a function',
+        timestamp: '2026-09-29T10:00:01.000Z',
+        url: 'https://example.test/app.js:4',
+      },
+    ],
+    matched: 2,
+    total: 2,
+    dropped: 0,
+    url: 'https://example.test/form',
+    title: 'Form',
+    tabs: TABS,
+  })
+  assert.match(text, /^Page: https:\/\/example\.test\/form — "Form"/)
+  assert.match(text, /oldest first \(2 matching\)/)
+  assert.match(text, /\[log\] booting\n\[error\] TypeError: save is not a function — https:\/\/example\.test\/app\.js:4/)
+  assert.doesNotMatch(text, /dropped/)
+})
+
+test('a console result says how much of the history it is not showing', () => {
+  const text = consoleText({
+    entries: [{ level: 'error', message: 'newest', timestamp: '2026-09-29T10:00:02.000Z' }],
+    matched: 4,
+    total: 9,
+    dropped: 3,
+    url: 'https://example.test/form',
+    title: 'Form',
+    tabs: TABS,
+  })
+  assert.match(text, /3 older matching entries are not shown/)
+  assert.match(text, /the buffer dropped 3 older entries/)
+})
+
+test('a page that has said nothing is reported as having said nothing', () => {
+  const quiet = consoleText({
+    entries: [],
+    matched: 0,
+    total: 0,
+    dropped: 0,
+    url: 'https://example.test/form',
+    title: 'Form',
+    tabs: TABS,
+  })
+  assert.match(quiet, /has said nothing since it loaded/)
+  // A page that has said plenty, none of it matching, is a different fact: the
+  // caller narrowed the question, and the page was not quiet.
+  const filtered = consoleText({
+    entries: [],
+    matched: 0,
+    total: 9,
+    dropped: 0,
+    url: 'https://example.test/form',
+    title: 'Form',
+    tabs: TABS,
+  })
+  assert.match(filtered, /Nothing the page said matches this call \(9 entries in all\)/)
+})
+
+test('a capture says what it is a picture of, and where the file is', () => {
+  assert.equal(
+    shotText({}, { path: 'C:\\shots\\shot-1.jpg', width: 1280, height: 720, bytes: 4567 }),
+    'Captured the viewport — 1280x720, 4567 bytes, in C:\\shots\\shot-1.jpg.',
+  )
+  assert.match(
+    shotText({ fullPage: true }, { path: 'C:\\shots\\shot-2.jpg', width: 1280, height: 4321, bytes: 9999 }),
+    /^Captured the whole page — 1280x4321/,
+  )
+  assert.match(
+    shotText({}, {
+      path: 'C:\\shots\\shot-3.jpg',
+      width: 120,
+      height: 45,
+      bytes: 700,
+      element: { role: 'button', name: 'Send' },
+    }),
+    /^Captured button "Send" — 120x45/,
+  )
+})
+
+test('a capture that was inlined says so, and one that was not says nothing about an image', () => {
+  const value = { path: 'C:\\shots\\shot-1.jpg', width: 10, height: 10, bytes: 100 }
+  assert.doesNotMatch(shotText({}, value), /attached/)
+  assert.match(shotText({}, { ...value, image: REF }), /The image itself is attached\./)
+})
+
+test('an inlined capture renders as the sentence and the image block beside it', () => {
+  const blocks = shotBlocks({}, {
+    path: 'C:\\shots\\shot-1.jpg',
+    width: 10,
+    height: 10,
+    bytes: 100,
+    image: REF,
+  })
+  assert.equal(blocks.length, 2)
+  assert.deepEqual(blocks[0]?.type, 'text')
+  // The block carries the store's own reference, which is what makes the
+  // picture durable: it is stored before the result is appended, so a replayed
+  // conversation still has it.
+  assert.deepEqual(blocks[1], { type: 'image', attachment: REF })
+})
+
+test('a capture that was not inlined renders as one text block', () => {
+  const blocks = shotBlocks({}, { path: 'C:\\shots\\shot-1.jpg', width: 10, height: 10, bytes: 100 })
+  assert.deepEqual(blocks.map(block => block.type), ['text'])
+})
+
 test('a snapshot result carries a dialog the page opened while it was being read', () => {
   const text = snapshotText({
     info: 'Page info: 1440x900 viewport, page 1440x900 — the whole page is in view',
@@ -185,4 +407,47 @@ test('a snapshot result carries a dialog the page opened while it was being read
   })
   assert.match(text, /A alert dialog asked "Session expiring" and was dismissed\./)
   assert.match(text, /- RootWebArea "Form"/)
+})
+
+test('a string the page returned comes back as the string, not as JSON', () => {
+  // The reference runtime returns strings as they are (`stringifyReplResult`),
+  // and quoting them is what made every read string arrive escaped: the model
+  // had to undo the escaping before it could use what it had just read.
+  assert.equal(readable('first line\nsecond "quoted" line'), 'first line\nsecond "quoted" line')
+  assert.equal(readable(''), '')
+})
+
+test('a structure the page returned comes back as JSON, and a value JSON cannot hold as its string', () => {
+  assert.equal(readable({ rows: 2, label: 'ok' }), '{\n  "rows": 2,\n  "label": "ok"\n}')
+  assert.equal(readable([1, 2]), '[\n  1,\n  2\n]')
+  assert.equal(readable(undefined), 'undefined')
+  // A function has no JSON form; its source is still a fact about the value.
+  assert.match(readable(() => 1), /^\(\) => 1$/)
+  const cyclic: Record<string, unknown> = {}
+  cyclic['self'] = cyclic
+  assert.equal(readable(cyclic), '[object Object]')
+})
+
+test('an evaluated result too large to print says where the whole of it went', () => {
+  const text = evaluateText({
+    result: 'first line\n… 400 more lines are in the file.',
+    path: 'C:\\spill\\result.txt',
+    hint: 'read C:\\spill\\result.txt with your file tools; grep it if it is long',
+  })
+  assert.match(text, /the whole of it is in C:\\spill\\result\.txt/)
+  assert.match(text, /read C:\\spill\\result\.txt with your file tools/)
+  assert.match(text, /^first line/)
+})
+
+test('an evaluated result that fits says nothing about files', () => {
+  assert.equal(evaluateText({ result: 'ok' }), 'ok')
+  assert.doesNotMatch(evaluateText({ result: 'ok' }), /file/)
+})
+
+test('an evaluated result carries a dialog the page opened while it ran', () => {
+  const text = evaluateText({
+    result: 'ok',
+    dialogs: [{ type: 'confirm', message: 'Leave?', defaultValue: '', handled: 'accepted' }],
+  })
+  assert.match(text, /^ok\n\nA confirm dialog asked "Leave\?" and was accepted\./)
 })

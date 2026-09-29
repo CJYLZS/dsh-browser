@@ -14,7 +14,7 @@ Status: proposed
 2026-09-24 又一次真机复验（Google 搜索结果页）确认了点击改造本身：折叠线以下的元素现在真的被点中并跳转、遮罩盖住时默认拒绝并指名接收者（一次是 `div "agent browser 最 佳 实践"`，一次是 `svg ""`）、加 `force: true` 能照发并在回报里写明"谁收到了这一击"、跨页旧 ref 被拒、视口外落点连 `force` 也不放行。同一轮新增两项摩擦：
 
 5. **无名接收者读起来没有线索**：Google 结果页的整块链接（`a` 包住标题与网址）落点常落在同一行的"关于这条结果的详细信息"三点控件上，探针按 `aria-label ?? textContent` 取名，于是拒绝消息里写的是 `svg ""`——模型看不出那是什么，也看不出该改成点内层的 `heading` ref。事实没错，但**下一步不可执行**，而当前最顺手的下一步（`force: true`）恰恰是错的。
-6. **别人已经证明有用的两件事我们还没有**：Playwright MCP 的 `browser_find`（按文本/正则搜当前快照，只回匹配节点加它在树里的路径，比整张快照便宜得多）与 `browser_snapshot` 的 `boxes: true`（每个元素附视口坐标）；vercel-labs 的 agent-browser 则把快照参数做成了 `-i`（只要可交互）、`-c`、`-d`、`-s <selector>` 加 `--json`。两者都指向同一件事：**筛快照比印快照更重要**，而我们现在只有 `target=` 与 `depth=`。
+6. **别人已经证明有用的两件事我们还没有**：Playwright MCP 的 `browser_find`（按文本/正则搜当前快照，只回匹配节点加它在树里的路径，比整张快照便宜得多）与 `browser_snapshot` 的 `boxes: true`（每个元素附视口坐标）；vercel-labs 的 agent-browser 则把快照参数做成了 `-i`（只要可交互）、`-c`、`-d`、`-s <selector>` 加 `--json`。两者都指向同一件事：**筛快照比印快照更重要**，而我们现在只有 `target=` 与 `depth=`。**（2026-09-28 更正：`find` 与 `boxes` 已发货，见[对照补齐那一篇](../../implemented/feature/2026-09-24-dialogs-chords-and-parity-round.md)；本条剩下的是 agent-browser 那组形状（`-i`/`-c`/`-d`/`-s`/`--json`）尚未评估。）**
 
 还有一项与工具无关但同在清单里：**重启会留下一份 20–30 MB 的 profile 目录**（实测 4 个 `dsh-browser-*` 共 56.7 MB，其中一个是重启前那个会话留下的）。
 
@@ -27,6 +27,8 @@ Status: proposed
 9. **`emphasis` 这类无名行内标记是纯噪声。** Google 为加粗命中的关键词，每段摘要里插 3–6 个 `<em>`，于是每个结果白白多出 3–6 行；在浅 `depth=` 下它们连子节点一起被截掉，印成 `- emphasis [ref=e99]` 这种**没有文字的空行**，比不印更糟。
 
 另一个不是缺陷但值得记的观察：快照里 Google 结果的 `url=` 是 `https://www.google.com/goto?url=CAESYAHrOzAVk51zljn1f2RAWryX…`——站点自己的跳转，还被打印预算截断，所以**从快照看不出链接真正去哪**，只能点开或 evaluate 取 `href`。判断落点时 `changed: url` 比 `url=` 可靠。
+
+2026-09-28 又一轮真机使用（**本地长驻 SPA**，与上面两轮的内容站不同类：每 tick 重渲染、同名控件成对、反馈是瞬时 toast）记在[单独一篇](2026-09-28-local-spa-drive-frictions.md)，本笔记不重复：那一轮的痛点从"印得太多"转到"观察与定位"，本笔记第 2/8 项的 `depth=` 一族（不可预测 + 截断不指路）又各撞了一次。
 
 ## Proposal
 

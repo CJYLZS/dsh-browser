@@ -320,10 +320,27 @@ test('a depth limit prints to that level and counts what is below it', () => {
     '- navigation "Main"',
     '  - list "Menu"',
     '',
-    '… 2 nodes are deeper than depth=1 and were not printed; raise depth to see them',
+    '… 2 nodes are deeper than depth=1 (the page goes to depth=2) and were not printed; raise depth to see them',
   ].join('\n'))
   assert.equal(snapshot.truncated, true)
   assert.equal(snapshot.elided.depth, 2)
+})
+
+test('the depth a snapshot left out comes with how much deeper the page goes', () => {
+  // The number a caller needs to raise the limit by, measured rather than
+  // guessed: without it, "raise depth" costs one round trip per attempt.
+  const deep = [
+    node({ nodeId: '1', role: { value: 'list' }, name: { value: 'Main' }, childIds: ['2'] }),
+    node({ nodeId: '2', role: { value: 'listitem' }, name: { value: 'Row' }, childIds: ['3'] }),
+    node({ nodeId: '3', role: { value: 'list' }, name: { value: 'Cell' }, childIds: ['4'] }),
+    node({ nodeId: '4', role: { value: 'link' }, name: { value: 'deep' }, backendDOMNodeId: 21 }),
+  ]
+  const shallow = formatAxTree(deep, { depth: 1 })
+  assert.match(shallow.text, /deeper than depth=1 \(the page goes to depth=3\)/)
+  // A snapshot that reprints the same page deep enough says nothing about depth.
+  const whole = formatAxTree(deep, { depth: 9 })
+  assert.doesNotMatch(whole.text, /depth=/)
+  assert.equal(whole.truncated, false)
 })
 
 test('backend nodes the caller asked to ignore are dropped with their subtrees', () => {

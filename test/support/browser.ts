@@ -62,6 +62,13 @@ export interface FakePage {
   /** Whether `page.close()` has been called. */
   readonly closed: boolean
   /**
+   * This page's main frame, as `page.on('framenavigated', …)` reports one.
+   *
+   * A subscriber has to be able to tell the document's own navigation from an
+   * embedded frame's, which it does by comparing against `page.mainFrame()`.
+   */
+  readonly frame: object
+  /**
    * Deliver a page event the plugin subscribed to.
    * @param event - event name, e.g. `framenavigated`.
    * @param args - event payload.
@@ -189,6 +196,7 @@ export function fakeLauncher(): FakeLaunch {
       const handlers = new Map<string, ((...args: unknown[]) => void)[]>()
       const cdp = fakeCdp()
       let pageClosed = false
+      const frame = { url: () => record.url }
       cdp.answers.set('Page.captureScreenshot', { data: Buffer.from('shot').toString('base64') })
       cdp.answers.set('Page.getLayoutMetrics', { cssVisualViewport: { clientWidth: 1280, clientHeight: 720 } })
       cdp.answers.set('Runtime.evaluate', { result: { value: 'evaluated' } })
@@ -196,11 +204,12 @@ export function fakeLauncher(): FakeLaunch {
       const page = {
         url: () => record.url,
         title: async () => `title of ${record.url}`,
+        mainFrame: () => frame,
         goto: async (target: string) => {
           record.url = target
-          record.emit('framenavigated')
+          record.emit('framenavigated', frame)
         },
-        reload: async () => { record.emit('framenavigated') },
+        reload: async () => { record.emit('framenavigated', frame) },
         // A fake page never has a load in flight, so waiting for one is
         // immediately satisfied; what it proves is that an action waits at all.
         waitForLoadState: async () => {},
@@ -221,6 +230,7 @@ export function fakeLauncher(): FakeLaunch {
       const record: FakePage = {
         page,
         cdp,
+        frame,
         url,
         userAgent: config.headless ? HEADLESS_UA : HEADFUL_UA,
         get closed() { return pageClosed },

@@ -6,7 +6,7 @@
  * actually in there.
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { test } from 'node:test'
 import { browserSkill, parseSkillFile } from '../src/skill.ts'
 
@@ -59,4 +59,49 @@ test('what the plugin registers is what the file says', () => {
   assert.equal(skill.content, parseSkillFile(SHIPPED).content)
   assert.equal(skill.resourceBase?.kind, 'directory')
   assert.equal(skill.source, 'custom')
+})
+
+/** The directory the harness tells the model to resolve relative paths against. */
+const BASE = new URL('../skills/dsh-browser/', import.meta.url)
+
+/** Every `references/…` path the guidance mentions, in the order it mentions them. */
+function mentionedRecipes(): string[] {
+  return [...SHIPPED.matchAll(/`(references\/[A-Za-z0-9._-]+\.md)`/gu)].map(match => match[1] as string)
+}
+
+test('the guidance describes the tools that exist, not only the first six', () => {
+  const skill = parseSkillFile(SHIPPED)
+  // The count in the opening paragraph is prose, and prose goes stale: it said
+  // "six tools" for two rounds after the seventh arrived.
+  assert.match(skill.content, /Eight tools drive it/um)
+  for (const tool of ['browser_snapshot', 'browser_click', 'browser_type', 'browser_evaluate', 'browser_wait', 'browser_console', 'browser_screenshot']) {
+    assert.match(skill.content, new RegExp(tool, 'u'), `the guidance never mentions ${tool}`)
+  }
+})
+
+test('every recipe the guidance lists is a file, and every file is a recipe it lists', () => {
+  const mentioned = mentionedRecipes()
+  assert.ok(mentioned.length >= 3, `the guidance lists ${String(mentioned.length)} recipes`)
+  for (const relative of mentioned) {
+    assert.ok(existsSync(new URL(relative, BASE)), `${relative} is listed but not shipped`)
+  }
+  // The other direction matters just as much: a file nobody is pointed at is a
+  // file no model will ever read.
+  const shipped = readdirSync(new URL('references/', BASE))
+    .map(name => `references/${name}`)
+    .filter(name => name.endsWith('.md'))
+  assert.deepEqual([...shipped].sort(), [...new Set(mentioned)].sort())
+})
+
+test('each recipe opens by naming the question it answers', () => {
+  for (const relative of mentionedRecipes()) {
+    const body = readFileSync(new URL(relative, BASE), 'utf8')
+    const lines = body.split('\n')
+    const heading = lines[0] ?? ''
+    const opening = lines.slice(1).find(line => line.trim() !== '') ?? ''
+    // The list entry and the file have to agree about what the file is for: a
+    // model that reads the wrong recipe has spent context on the wrong question.
+    assert.match(heading, /^# \S/u, `${relative} does not open with a heading`)
+    assert.match(opening, /^Read when /u, `${relative} does not say when to read it`)
+  }
 })

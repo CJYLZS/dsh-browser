@@ -105,6 +105,94 @@ const TYPING_FIXTURE = `<!doctype html><meta charset="utf-8"><title>typing fixtu
 <input id="free" placeholder="free">`
 
 /**
+ * A page that reacts to one click in three different ways at once.
+ *
+ * The three are the shapes a change summary has to tell apart: a node appearing
+ * with something to say, an attribute toggled on the element that was clicked,
+ * and a run of text rewritten in place. All of it happens inside the handler, so
+ * a probe armed after the press would see none of it — which is the same reason
+ * `[10]` exists.
+ */
+const CHANGES_FIXTURE = `<!doctype html><meta charset="utf-8"><title>changes fixture</title>
+<h1>Changes fixture</h1>
+<button id="go">启动并连接</button>
+<p id="count">24.1k</p>
+<div id="host"></div>
+<script>
+document.querySelector('#go').addEventListener('click', () => {
+  const status = document.createElement('div')
+  status.setAttribute('role', 'status')
+  status.textContent = '先在实例表里点一行'
+  document.querySelector('#host').appendChild(status)
+  document.querySelector('#count').textContent = '24.2k'
+  document.querySelector('#go').setAttribute('disabled', 'true')
+})
+</script>`
+
+/**
+ * A page that becomes ready a moment after it is opened.
+ *
+ * The delay is the whole point: "is it there yet" is only a question a wait can
+ * answer, and a page that was ready immediately would be answered by the first
+ * ask, proving nothing about the asking. What appears is a **button** whose
+ * accessible name is computed from the text inside it, because that is the shape
+ * where the element and the text run under it say the same words — the wait has
+ * to match one thing there, and the caller has to be able to act on what it
+ * waited for.
+ */
+const WAIT_FIXTURE = `<!doctype html><meta charset="utf-8"><title>wait fixture</title>
+<h1>Wait fixture</h1>
+<button id="go">Start</button>
+<div id="host"></div>
+<p id="state">starting</p>
+<script>
+document.querySelector('#go').addEventListener('click', () => {
+  setTimeout(() => {
+    const ready = document.createElement('button')
+    ready.id = 'ready'
+    ready.textContent = 'engine ready'
+    ready.addEventListener('click', () => { globalThis.__clicked = true })
+    document.querySelector('#host').appendChild(ready)
+    document.querySelector('#state').textContent = 'ready'
+    globalThis.__ready = true
+  }, 1200)
+})
+</script>`
+
+/**
+ * A page that fails in the three ways a page leaves no mark in the DOM.
+ *
+ * Each is a different event on the wire: a console call, an uncaught exception,
+ * and a resource the browser refuses. None of them changes the accessibility
+ * tree or the DOM, which is exactly why the change list cannot explain them —
+ * and why the listener has to be attached before the page loads rather than
+ * asked about afterwards.
+ */
+const CONSOLE_FIXTURE = `<!doctype html><meta charset="utf-8"><title>console fixture</title>
+<h1>Console fixture</h1>
+<p id="state">quiet</p>
+<img src="data:image/png;base64,not-a-png" alt="broken image">
+<script>
+  console.log('booting')
+  console.error('save failed', { code: 500 })
+  setTimeout(() => { throw new TypeError('save is not a function') }, 50)
+</script>`
+
+/**
+ * A tall page with a marked control below the fold.
+ *
+ * The control's own size is what an element capture has to report, and its
+ * position below the fold is what makes the capture's coordinate space visible:
+ * a clip read as viewport pixels would capture blank paper here, and would
+ * capture a different picture after the page is scrolled.
+ */
+const SHOT_FIXTURE = `<!doctype html><meta charset="utf-8"><title>shot fixture</title>
+<h1>Shot fixture</h1>
+<div style="height:1800px"></div>
+<button id="deep" style="width:180px;height:60px">Deep button</button>
+<div style="height:600px"></div>`
+
+/**
  * A page that asks before it does anything, and writes down the answer.
  *
  * A dialog is invisible to every other way of reading a page: it is not in the
@@ -616,6 +704,161 @@ async function main() {
       check('a key pressed with no ref goes to the page and leaves the focus alone',
         afterEscape === 'down Escape' && focusKept === 'field',
         `${JSON.stringify(afterEscape)} with the focus on ${JSON.stringify(focusKept)}`)
+    }
+
+    log('\n[22] a click says what the page changed, not just that it did')
+    const changesUrl = `data:text/html;charset=utf-8,${encodeURIComponent(CHANGES_FIXTURE)}`
+    await step('navigate to the changes fixture', 30_000, () => browser.navigate(changesUrl))
+    const changesTree = await step('changes fixture snapshot', 30_000, () => browser.snapshot())
+    const goRef = refFor(changesTree.text, /"启动并连接"/)
+    if (goRef === undefined) {
+      check('the button that changes the page has a ref', false, 'no line named the button')
+    } else {
+      const acted = await step('click the button that changes the page', 30_000, () => browser.click(goRef))
+      const changes = acted.changes ?? []
+      const added = changes.find(change => change.kind === 'added')
+      const toggled = changes.find(change => change.kind === 'attribute')
+      const rewritten = changes.find(change => change.kind === 'text')
+      check('a node the click added is named by what it says',
+        added?.role === 'status' && added?.tag === 'div' && added?.preview === '先在实例表里点一行',
+        JSON.stringify(added ?? null))
+      check('an attribute the click toggled carries both sides of the change',
+        toggled?.tag === 'button' && toggled?.attribute === 'disabled'
+          && toggled?.from === undefined && toggled?.to === 'true',
+        JSON.stringify(toggled ?? null))
+      check('a run of text the click rewrote carries the text before and after',
+        rewritten?.tag === 'p' && rewritten?.from === '24.1k' && rewritten?.to === '24.2k',
+        JSON.stringify(rewritten ?? null))
+      check('the page still reports that it changed at all',
+        acted.changed.includes('dom') && acted.settled === true,
+        JSON.stringify({ changed: acted.changed, settled: acted.settled, mutations: acted.mutations }))
+      log(`      changes: ${JSON.stringify(changes)}${acted.changesOmitted === undefined ? '' : ` (+${String(acted.changesOmitted)} omitted)`}`)
+    }
+
+    log('\n[23] a wait waits for the page to become ready, and says which happened')
+    const waitUrl = `data:text/html;charset=utf-8,${encodeURIComponent(WAIT_FIXTURE)}`
+    await step('navigate to the wait fixture', 30_000, () => browser.navigate(waitUrl))
+    const waitTree = await step('wait fixture snapshot', 30_000, () => browser.snapshot())
+    const goWaitRef = refFor(waitTree.text, /"Start"/)
+    if (goWaitRef === undefined) {
+      check('the button that starts the delayed work has a ref', false, 'no line named "Start"')
+    } else {
+      // Nothing is ready yet: the wait must be the thing that finds out.
+      const early = await step('ask for a state that is not there yet', 30_000,
+        () => browser.wait({ locator: { text: 'engine ready' } }, { timeoutMs: 300 }))
+      check('a wait that runs out of time reports the wait, not a failure',
+        early.matched === false && early.waitedMs >= 300 && early.url.startsWith('data:text/html'),
+        `${JSON.stringify({ matched: early.matched, waitedMs: early.waitedMs })}`)
+
+      await step('start the delayed work', 30_000, () => browser.click(goWaitRef))
+      const waited = await step('wait for the state the page will reach', 30_000,
+        () => browser.wait({ locator: { text: 'engine ready' } }, { timeoutMs: 8_000 }))
+      check('a wait returns as soon as the element the page adds is there',
+        waited.matched === true
+          && waited.element?.role === 'button'
+          && waited.element?.name === 'engine ready'
+          && waited.waitedMs < 8_000,
+        JSON.stringify({ waitedMs: waited.waitedMs, element: waited.element ?? null }))
+      // The element's name is computed from the text inside it, so the text run
+      // under it says the same words: a second candidate here would both
+      // misreport the wait and make the click below refuse as ambiguous.
+      check('the element and the text run inside it are one answer, not two',
+        waited.matches === 1, `matches=${String(waited.matches)}`)
+      const arrived = await step('read whether the page really got there', 30_000,
+        () => browser.evaluate('({ ready: globalThis.__ready === true, text: document.querySelector("#state").textContent })'))
+      check('the wait matched a page that really became ready',
+        arrived?.ready === true && arrived?.text === 'ready', JSON.stringify(arrived ?? null))
+
+      // What the caller waited for has to be what it can act on: the same words,
+      // as a locator, with no ref in between.
+      const acted = await step('click what the wait matched, by the same words', 30_000,
+        () => browser.click({ text: 'engine ready' }))
+      const clicked = await step('read whether the click landed', 30_000,
+        () => browser.evaluate('globalThis.__clicked === true'))
+      check('what the wait matched can be acted on by the same locator',
+        acted.element?.role === 'button' && clicked === true,
+        `${JSON.stringify(acted.element ?? null)} clicked=${String(clicked)}`)
+
+      // The address condition does not read the tree, and must not: a page whose
+      // URL is already right is matched by the first ask.
+      const here = await step('wait on an address that is already right', 30_000,
+        () => browser.wait({ url: 'charset=utf-8' }, { timeoutMs: 1_000 }))
+      check('an address condition matches without asking the page anything',
+        here.matched === true, JSON.stringify({ matched: here.matched, url: here.url }))
+    }
+
+    log('\n[24] a page that fails without touching the DOM is explained by what it said')
+    const consoleUrl = `data:text/html;charset=utf-8,${encodeURIComponent(CONSOLE_FIXTURE)}`
+    await step('navigate to the console fixture', 30_000, () => browser.navigate(consoleUrl))
+    // The exception is thrown on a timer, so it lands after the navigation has
+    // settled: waiting is the second half of the capture working at all.
+    await step('let the fixture throw', 30_000, () => browser.wait({ timeMs: 300 }, { timeoutMs: 5_000 }))
+    const consoleReport = await step('read what the page said', 30_000, () => browser.pageConsole())
+    const spoken = consoleReport.entries.map(entry => entry.message)
+    const levels = new Set(consoleReport.entries.map(entry => entry.level))
+    check('a console call is captured with the level it was made at',
+      spoken.some(message => message.includes('booting')) && levels.has('log'),
+      JSON.stringify(consoleReport.entries.map(entry => `${entry.level}:${entry.message}`)))
+    check('an uncaught exception is captured, and says what it was',
+      spoken.some(message => /save is not a function/.test(message)),
+      JSON.stringify(spoken))
+    check('the message carries where it came from',
+      consoleReport.entries.every(entry => entry.url === undefined || typeof entry.url === 'string'),
+      JSON.stringify(consoleReport.entries.map(entry => entry.url ?? null)))
+    // A logged object is the one part of a console message the protocol does not
+    // serialize; what it can say is the shape, and this measures whether the
+    // preview came through or the model only ever sees "Object".
+    check('a logged object arrives as something readable rather than as "Object"',
+      spoken.some(message => /save failed/.test(message) && /code/.test(message)),
+      JSON.stringify(spoken))
+    check('the counts say how much of the history this is',
+      consoleReport.total >= 3 && consoleReport.dropped === 0 && consoleReport.matched === consoleReport.total,
+      JSON.stringify({ total: consoleReport.total, matched: consoleReport.matched, dropped: consoleReport.dropped }))
+
+    await step('navigate to a quiet page', 30_000, () => browser.navigate('data:text/html,<title>quiet</title><p>quiet</p>'))
+    const afterNavigation = await step('read the console of the new document', 30_000, () => browser.pageConsole())
+    check('a new document starts with an empty console',
+      afterNavigation.total === 0 && afterNavigation.entries.length === 0,
+      JSON.stringify({ total: afterNavigation.total, entries: afterNavigation.entries.length }))
+
+    log('\n[25] a capture can be the whole page or one element, without scrolling to it')
+    const shotUrl = `data:text/html;charset=utf-8,${encodeURIComponent(SHOT_FIXTURE)}`
+    await step('navigate to the shot fixture', 30_000, () => browser.navigate(shotUrl))
+    const shotTree = await step('shot fixture snapshot', 30_000, () => browser.snapshot())
+    const deepRef = refFor(shotTree.text, /"Deep button"/)
+    if (deepRef === undefined) {
+      check('the control below the fold has a ref', false, 'no line named the button')
+    } else {
+      const viewportShot = await step('capture the viewport', 30_000, () => browser.screenshot())
+      const fullShot = await step('capture the whole page', 30_000, () => browser.screenshot({ fullPage: true }))
+      check('a viewport capture reports the window',
+        viewportShot.width === shotTree.info.viewportWidth && viewportShot.height === shotTree.info.viewportHeight,
+        `${String(viewportShot.width)}x${String(viewportShot.height)} vs ${String(shotTree.info.viewportWidth)}x${String(shotTree.info.viewportHeight)}`)
+      check('a whole-page capture reports the document, which is taller than the window',
+        fullShot.height === shotTree.info.pageHeight && fullShot.height > shotTree.info.viewportHeight,
+        `${String(fullShot.width)}x${String(fullShot.height)} vs page ${String(shotTree.info.pageHeight)}`)
+
+      const elementShot = await step('capture the control below the fold', 30_000,
+        () => browser.screenshot({ target: deepRef }))
+      // The fixture's own CSS says 180x60; a button's border adds a pixel or two.
+      check('an element capture is the size of the element, not of the page',
+        elementShot.width >= 180 && elementShot.width <= 200 && elementShot.height >= 60 && elementShot.height <= 80
+          && elementShot.element?.name === 'Deep button',
+        `${String(elementShot.width)}x${String(elementShot.height)} ${JSON.stringify(elementShot.element ?? null)}`)
+      check('an element below the fold is captured without scrolling the page',
+        (await step('read the scroll position', 30_000, () => browser.evaluate('window.scrollY'))) === 0,
+        'the page was scrolled to reach the element')
+
+      // The decisive measurement: a clip is in page pixels, so the same element
+      // is the same picture whatever the window is showing. Read as viewport
+      // pixels it would be one picture here and a different one below.
+      await step('scroll the page past the element', 30_000, () => browser.evaluate('window.scrollTo(0, 900)'))
+      const scrolledShot = await step('capture the same element again', 30_000, () => browser.screenshot({ target: deepRef }))
+      check('the same element is the same picture at any scroll position',
+        scrolledShot.jpeg.equals(elementShot.jpeg),
+        `${String(elementShot.jpeg.length)} vs ${String(scrolledShot.jpeg.length)} bytes`)
+      writeFileSync(join(OUT_DIR, 'shot-element.jpg'), elementShot.jpeg)
+      writeFileSync(join(OUT_DIR, 'shot-fullpage.jpg'), fullShot.jpeg)
     }
 
   } finally {

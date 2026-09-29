@@ -216,12 +216,12 @@ function text(value: unknown): string {
 }
 
 /** A node's role, with a placeholder for the nodes that report none. */
-function roleOf(node: AxNode): string {
+export function roleOf(node: AxNode): string {
   return text(node.role?.value) || 'node'
 }
 
 /** A node's accessible name. */
-function nameOf(node: AxNode): string {
+export function nameOf(node: AxNode): string {
   return text(node.name?.value)
 }
 
@@ -450,10 +450,28 @@ function hiddenFromAt(node: AxNode): boolean {
 }
 
 /**
+ * Whether a node is a run of text rather than an element.
+ *
+ * A snapshot prints these — the merged words of a run are what a reader sees —
+ * but it never mints a ref for one, because there is no element to act on: the
+ * thing a caller would click is the element around the run, and that element's
+ * own line carries the words too whenever it computes its name from them.
+ * @param node - one node of the accessibility tree.
+ * @returns whether the node is text rather than an element.
+ */
+export function isTextRun(node: AxNode): boolean {
+  const role = roleOf(node)
+  return role === 'StaticText' || TEXT_ROLES.has(role)
+}
+
+/**
  * The ref target a node makes, when it has a DOM node behind it.
  *
  * This is the same reading a printed line uses, which is what lets an action
- * look for an element again by what the snapshot said about it.
+ * look for an element again by what the snapshot said about it. A run of text is
+ * included when it has a DOM node behind it — it is not labelled, but it is where
+ * text a caller can see actually lives, and a locator is the layer that decides
+ * whether the element around it already says the same thing.
  * @param node - one node of the accessibility tree.
  * @returns the DOM node and its semantics, or `undefined` for a node with neither.
  */
@@ -568,6 +586,31 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
   for (const root of start) measure(root, [])
 
   /**
+   * The deepest level the printer would reach under one node.
+   *
+   * A depth limit is only useful if the caller knows how much deeper the page
+   * goes: "8 nodes are deeper than depth=2" says what was left out but not what
+   * to ask for, and raising the limit blind costs a round trip per attempt. This
+   * walks the same tree the printer walks — with the same promotion rule, where
+   * a dropped wrapper's children print at the wrapper's own level — and returns
+   * the deepest level any printable node sits at. It costs one pass over nodes
+   * that are already in memory, and nothing about it is printed.
+   * @param node - the node to measure from.
+   * @param depth - the level this node prints at.
+   * @returns the deepest printable level at or under this node.
+   */
+  const deepestDepth = (node: AxNode, depth: number): number => {
+    if (dropWholeSubtree(node)) return 0
+    const prints = printable.has(node)
+    let deepest = prints ? depth : 0
+    const childDepth = prints ? depth + 1 : depth
+    for (const child of childrenOf(node)) {
+      deepest = Math.max(deepest, deepestDepth(child, childDepth))
+    }
+    return deepest
+  }
+
+  /**
    * The text of the run of consecutive text nodes that starts at one sibling.
    *
    * Consecutive runs print as one line, so the words a reader sees are the run's
@@ -661,7 +704,7 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
     }
     const backendNodeId = node.backendDOMNodeId
     let ref: string | undefined
-    if (backendNodeId !== undefined && roleOf(node) !== 'StaticText' && !TEXT_ROLES.has(roleOf(node))) {
+    if (backendNodeId !== undefined && !isTextRun(node)) {
       const labelled = labels.labelFor(backendNodeId, roleOf(node), nameOf(node))
       ref = labelled.label
       refs.set(labelled.label, backendNodeId)
@@ -734,8 +777,13 @@ export function formatAxTree(nodes: readonly AxNode[], options: SnapshotOptions 
     )
   }
   if (depthElided > 0) {
+    // The interval, not just the lower bound: what was left out sits between the
+    // limit and the deepest level the page reaches, and the second number is
+    // what makes "raise depth" an instruction rather than a guess.
+    const deepest = Math.max(depthLimit ?? 0, ...start.map(root => deepestDepth(root, 0)))
     notes.push(
       `… ${String(depthElided)} nodes are deeper than depth=${String(depthLimit ?? 0)}`
+      + `${deepest > (depthLimit ?? 0) ? ` (the page goes to depth=${String(deepest)})` : ''}`
       + ' and were not printed; raise depth to see them',
     )
   }

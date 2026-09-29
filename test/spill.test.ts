@@ -21,7 +21,7 @@ import {
   shouldSpill,
   spillStoreOf,
   writeText,
-  SNAPSHOT_INLINE_CHARS,
+  INLINE_CHARS,
   type SaveTextRequest,
   type SpillStore,
 } from '../src/tools/spill.ts'
@@ -50,8 +50,8 @@ test('a text within the preview is returned whole', () => {
 test('spilling is what the caller asked for, or what the size demands', () => {
   assert.equal(shouldSpill('short', true), true)
   assert.equal(shouldSpill('short', false), false)
-  assert.equal(shouldSpill('x'.repeat(SNAPSHOT_INLINE_CHARS + 1), false), true)
-  assert.equal(shouldSpill('x'.repeat(SNAPSHOT_INLINE_CHARS), false), false)
+  assert.equal(shouldSpill('x'.repeat(INLINE_CHARS + 1), false), true)
+  assert.equal(shouldSpill('x'.repeat(INLINE_CHARS), false), false)
 })
 
 test('without a spill store the text goes to a file the caller can read', async () => {

@@ -56,8 +56,15 @@ export interface Spilled {
   readonly bytes: number
 }
 
-/** Text longer than this is written to a file instead of returned inline. */
-export const SNAPSHOT_INLINE_CHARS = 40_000
+/**
+ * Text longer than this is written to a file instead of returned inline.
+ *
+ * One number for every tool that can produce more text than a result should
+ * carry: a snapshot of a large page and the value of an expression that read one
+ * are the same problem, and two thresholds would only mean two answers to "is
+ * this too big to print".
+ */
+export const INLINE_CHARS = 40_000
 
 /** Lines a spill preview keeps inline. */
 const PREVIEW_LINES = 20
@@ -72,23 +79,34 @@ let counter = 0
  * @returns whether to spill.
  */
 export function shouldSpill(text: string, requested: boolean): boolean {
-  return requested || text.length > SNAPSHOT_INLINE_CHARS
+  return requested || text.length > INLINE_CHARS
+}
+
+/**
+ * A service the composition may or may not mount, by name.
+ *
+ * Looked up through the context rather than injected: this plugin is designed to
+ * work in compositions that mount none of these — a missing spill store is a
+ * fallback rather than a failure to load, and a missing attachment service is a
+ * capability the caller is told about. The lookup is structural because the
+ * plugin deliberately does not depend on the packages behind the names.
+ * @param ctx - the plugin context.
+ * @param name - the service name, as the harness mounts it.
+ * @returns whatever is mounted under that name.
+ */
+export function serviceOf(ctx: Context, name: string): unknown {
+  const lookup = (ctx as unknown as { get?: (service: string) => unknown }).get
+  if (typeof lookup !== 'function') return undefined
+  return lookup.call(ctx, name)
 }
 
 /**
  * The harness spill store, when the composition mounts one.
- *
- * Looked up through the context rather than injected: this plugin works in a
- * composition without `dsh-spill-local`, and a missing store is a fallback
- * rather than a failure to load. The lookup is structural because the plugin
- * deliberately does not depend on `@deepseek-ai/dsh-spill`.
  * @param ctx - the plugin context.
  * @returns the store, or `undefined` when the composition has none.
  */
 export function spillStoreOf(ctx: Context): SpillStore | undefined {
-  const lookup = (ctx as unknown as { get?: (name: string) => unknown }).get
-  if (typeof lookup !== 'function') return undefined
-  const candidate = lookup.call(ctx, 'spillStore') as Partial<SpillStore> | undefined
+  const candidate = serviceOf(ctx, 'spillStore') as Partial<SpillStore> | undefined
   return typeof candidate?.saveText === 'function' ? candidate as SpillStore : undefined
 }
 
