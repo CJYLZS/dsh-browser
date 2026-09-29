@@ -248,6 +248,17 @@ const KEYS_FIXTURE = `<!doctype html><meta charset="utf-8"><title>keys fixture</
   document.querySelector('#field').addEventListener('dblclick', () => written('dblclick'));
 </script>`
 
+/**
+ * A page that opens a second page, the way a link with `target=_blank` does.
+ *
+ * The second page is where the sidebar's 1:1 rule meets a real browser: two
+ * pages that both sit on `about:blank` must still be two identities, and the
+ * one that closes must leave the other alone.
+ */
+const POPUP_FIXTURE = `<!doctype html><meta charset="utf-8"><title>popup fixture</title>
+<button id="open" onclick="const w = window.open('about:blank', 'second'); w.document.title = 'second page'; w.document.body.textContent = 'I am the second page'; document.querySelector('#log').textContent = 'opened'">Open second page</button>
+<p id="log">nothing yet</p>`
+
 const t0 = Date.now()
 const results = []
 
@@ -913,6 +924,66 @@ async function main() {
       (await step('read whether the fixture was clicked', 30_000,
         () => browser.evaluate('globalThis.__clicked === true'))) === false,
       'a refused locator acted anyway')
+
+    log('\n[27] a page has an identity the sidebar can name, and a close that follows it')
+    const popupUrl = `data:text/html;charset=utf-8,${encodeURIComponent(POPUP_FIXTURE)}`
+    await step('navigate to the popup fixture', 30_000, () => browser.navigate(popupUrl))
+    const popupTree = await step('popup fixture snapshot', 30_000, () => browser.snapshot())
+    const openRef = refFor(popupTree.text, /"Open second page"/)
+    if (openRef === undefined) {
+      check('the popup fixture has a control to open a second page', false, 'no line named the button')
+    } else {
+      await step('click to open the second page', 30_000, () => browser.click(openRef))
+      // Adoption names a page one call after it exists; the poll is the beat.
+      const before = await step('wait for the second page to be named', 30_000, async () => {
+        for (let attempt = 0; attempt < 80; attempt++) {
+          const status = browser.status()
+          if (status.tabs.length === 2 && status.tabs.every(tab => tab.targetId !== undefined)) return status
+          await new Promise(resolve => { setTimeout(resolve, 250) })
+        }
+        return browser.status()
+      })
+      // One page per tab, each named: two pages on the SAME origin-less blank
+      // must still be two identities, and both must carry a title.
+      check('a page the browser opened has its own CDP target id',
+        before.tabs.length === 2
+        && before.tabs.every(tab => typeof tab.targetId === 'string' && tab.targetId !== '')
+        && before.tabs[0]?.targetId !== before.tabs[1]?.targetId,
+        JSON.stringify(before.tabs.map(tab => ({ url: tab.url, targetId: tab.targetId }))))
+      check('every tab carries a title',
+        before.tabs.every(tab => typeof tab.title === 'string' && tab.title !== ''),
+        JSON.stringify(before.tabs.map(tab => tab.title)))
+      const fresh = await step('read the tab list fresh', 30_000, () => browser.statusAsync())
+      check('a fresh read answers the same identities with titles',
+        fresh.tabs.length === 2 && fresh.tabs.every(tab => tab.title !== ''),
+        JSON.stringify(fresh.tabs.map(tab => ({ title: tab.title, targetId: tab.targetId }))))
+
+      // The per-page mirror: frames from the page a viewer names, on a session
+      // of its own. The page is asked to repaint, since a still page casts
+      // almost nothing.
+      const named = fresh.tabs.find(tab => tab.url === 'about:blank' && tab.active !== true) ?? fresh.tabs[1]
+      const frames = []
+      const stopWatching = await step('watch the second page', 30_000,
+        () => browser.addPageViewer(frame => frames.push(frame.jpeg.length), named?.targetId ?? ''))
+      await step('repaint the second page', 30_000, async () => {
+        for (let attempt = 0; attempt < 20 && frames.length === 0; attempt++) {
+          await browser.evaluate('document.body && (document.body.style.color = document.body.style.color === "red" ? "blue" : "red")')
+          await new Promise(resolve => { setTimeout(resolve, 250) })
+        }
+      })
+      check('a viewer naming a page is sent that page frames', frames.length > 0,
+        `${String(frames.length)} frame(s)`)
+      stopWatching()
+
+      // Closing the page the tab named: the browser outlives it, and what is
+      // left is the page that was there first.
+      await step('close the second page by its target id', 30_000,
+        () => browser.closePage(named?.targetId ?? ''))
+      const after = await step('read the tab list after the close', 30_000, () => browser.status())
+      check('closing one page keeps the browser and the other page',
+        after.state === 'ready' && after.tabs.length === 1,
+        JSON.stringify({ state: after.state, tabs: after.tabs.map(tab => tab.url) }))
+    }
 
   } finally {
     await browser.close().catch(() => {})

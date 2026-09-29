@@ -2,6 +2,8 @@
 
 Status: implemented
 
+> 2026-09-29 更新：本篇的决定 1（`userClosed` 把"用户关的"和"它死了"分开）仍然成立；决定 2 与 3 被取代——侧栏标签与浏览器页面改为一一对应，关标签即关页面，「关闭浏览器」按钮删除，"变化时揭示"换成无条件对账。见[那一篇](2026-09-29-one-tab-per-page.md)。
+
 ## Problem
 
 浏览器属于会话，面板只是它的观察窗，但两边的生命周期一直是各走各的，于是同一个缺陷从两头冒出来：
@@ -13,8 +15,8 @@ Status: implemented
 ## Decision
 
 1. **"用户关的"和"它死了"分开。** 新增 `SessionBrowser.stop()`：置 `userClosed` 再走 `close()`，这是面板关闭按钮的入口（viewer 的 `close` verb → `stop()`）。`close()` 仍是"停掉"——配置变更、会话销毁、启动失败。viewer 路径（`openStreamForViewers()`）见 `userClosed` 直接返回；`ensure()` 在开头清掉它，因为够到 `ensure()` 的每一条路径（工具、restart、改启动项）都是**在要一台浏览器**。
-2. **关闭浏览器同时关闭它的面板标签。** 面板 body 通过 seat 注入的 `useTabInfo` 拿到 `tab.actions.close()`，在发出 `close` 之后调用。留下的观察窗没有东西可看，却是下一个可能把浏览器叫回来的订阅者。
-3. **agent 起浏览器时面板自己打开。** 客户端半边 `revealOnBrowserStart()`（[`src/client/reveal.ts`](../../../../src/client/reveal.ts)）在"侧栏没有浏览器标签"时每 1.5 s 读一次 `/dsh-browser/status`，当前会话的实例从"没在跑"（含从未出现过）变成"在跑"就 `ctx.sidebarRight.openTabIn(sessionId, 'cdpBrowser')`——`openTabIn` 会在同一步展开栏目，所以侧边栏自己就开了，并且已经在那一页上。判据是**变化**而不是状态：用户手动关掉的观察窗不会因为浏览器已经在跑而被重新拉出来。
+2. **关闭浏览器同时关闭它的面板标签。** 面板 body 通过 seat 注入的 `useTabInfo` 拿到 `tab.actions.close()`，在发出 `close` 之后调用。留下的观察窗没有东西可看，却是下一个可能把浏览器叫回来的订阅者。（2026-09-29 起按钮删除：关标签即关页面，见[那一篇](2026-09-29-one-tab-per-page.md)。）
+3. **agent 起浏览器时面板自己打开。** 客户端半边 `revealOnBrowserStart()`（[`src/client/reveal.ts`](../../../../src/client/reveal.ts)）在"侧栏没有浏览器标签"时每 1.5 s 读一次 `/dsh-browser/status`，当前会话的实例从"没在跑"（含从未出现过）变成"在跑"就 `ctx.sidebarRight.openTabIn(sessionId, 'cdpBrowser')`——`openTabIn` 会在同一步展开栏目，所以侧边栏自己就开了，并且已经在那一页上。判据是**变化**而不是状态：用户手动关掉的观察窗不会因为浏览器已经在跑而被重新拉出来。（2026-09-29 起"变化时揭示"被无条件对账取代：1:1 之下不再存在"标签关了页面还在"需要保护的��态，见[那一篇](2026-09-29-one-tab-per-page.md)。）
 4. **浏览器只有一个字形。** [`src/client/glyph.ts`](../../../../src/client/glyph.ts) 只做转出：侧栏标签标题（`title.tsx` 注册进 `sidebar.right.pane.tab.title`）与 guide 条目（`definition.ts` 的 `guide[].icon`）用产品自带的 `IconGlobeOutlineRegular`——harness 内置的 Browser 标签画的正是它，自己再画一个地球就会在一行标签里出现两个略有差别的地球；地址栏的 globe 用同一图标的 `Medium` 权重，与它旁边的锁同粗细。`definition.ts` 把字形作为**入参**收下而不是 import 它，这样 `test/*.test.ts` 才能在 Node 的类型剥离下 import 那份定义（primitives 包的 CSS module 在那里加载不了）。
 
 ## 为什么"变化"而不是"在跑"
