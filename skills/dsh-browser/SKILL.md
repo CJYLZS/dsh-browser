@@ -6,7 +6,7 @@ whenToUse: The conversation has a browser (the user opened the Browser tab, or t
 
 # Driving this conversation's browser
 
-The browser belongs to this conversation: its own process, its own profile, its own pages. Eight tools drive it, and `browser_evaluate` is the general one. The other seven exist for what code does badly — reading a page without knowing its selectors first, input a site accepts as real, and the two questions a page can only be asked over time (did it reach a state, and what did it say about itself).
+The browser belongs to this conversation: its own process, its own profile, its own pages. Nine tools drive it, and `browser_evaluate` is the general one. The others exist for what code does badly — reading a page without knowing its selectors first, input a site accepts as real, the two questions a page can only be asked over time (did it reach a state, and what did it say about itself), and **the pages themselves**: `browser_tabs` lists them, opens one, selects which one the other tools act on, and closes one. Everything else acts on the selected page, and a page can open a tab of its own — a link with `target=_blank`, a `window.open` — which moves that selection, so read the page list a result carries when the next call must land on a particular page.
 
 ## Read before you act
 

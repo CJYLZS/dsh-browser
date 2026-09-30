@@ -146,9 +146,49 @@ export function readable(value: unknown): string {
  */
 export function tabsText(tabs: readonly TabSummary[]): string {
   if (tabs.length === 0) return 'No pages are open.'
+  // The id comes first because it is the one thing here a later call copies:
+  // `browser_tabs` selects and closes pages by it.
   return tabs
-    .map(tab => `[${tab.active ? 'active' : String(tab.index)}] ${tab.url}`)
+    .map(tab => `[${tab.active ? 'active' : String(tab.index)}] ${tab.targetId ?? '-'} ${tab.url}`)
     .join('\n')
+}
+
+/** What a `browser_tabs` result carries, as its render reads it. */
+export interface TabsValue {
+  /** Which action ran. */
+  readonly action: 'list' | 'open' | 'select' | 'close'
+  /** Every page the browser holds, in its own order. */
+  readonly tabs: readonly TabSummary[]
+  /** The page the action acted on, by its CDP target id. */
+  readonly targetId?: string
+  /** That page's address after the action. */
+  readonly url?: string
+}
+
+/**
+ * What a `browser_tabs` call did, in the words the model needs to act next.
+ *
+ * The page list follows every action, because that is what a selection changes
+ * and what tells an open apart from a close: the ids printed here are the ones a
+ * later select or close copies.
+ * @param value - what the call reported.
+ * @returns the report text.
+ */
+export function tabsActionText(value: TabsValue): string {
+  const pages = tabsText(value.tabs)
+  if (value.action === 'list') {
+    return value.tabs.length === 0
+      ? 'No pages are open. `open` starts the browser and gives it one.'
+      : pages
+  }
+  if (value.action === 'close') {
+    return `Closed page ${value.targetId ?? 'unknown'}.${value.tabs.length === 0 ? ' That was the last page, so the browser stopped.' : ''}\n\n${pages}`
+  }
+  if (value.action === 'select') {
+    return `Now acting on page ${value.targetId ?? 'unknown'}${value.url === undefined ? '' : ` (${value.url})`}.\n\n${pages}`
+  }
+  const named = value.targetId === undefined ? '' : ` Its id is ${value.targetId}.`
+  return `Opened a new page${value.url === undefined ? '' : ` on ${value.url}`}.${named}\n\n${pages}`
 }
 
 /**
@@ -1495,6 +1535,75 @@ export function registerTools(ctx: Context, pool: BrowserPool): void {
     },
     timeoutMs: EVALUATE_TIMEOUT_MS,
   })), 'dsh-browser: browser_evaluate')
+
+  ctx.effect(() => ctx.tools.register(defineTool({
+    name: 'browser_tabs',
+    description: 'See and steer the pages of this conversation\'s local browser. Every other browser tool acts on one page — the selected one — and a page can open a tab of its own (a link with target=_blank, a window.open), which moves that selection. This is where the pages are listed and where the selection is moved back. "list" reports every page with the id it is addressed by, its address, and which page the other tools act on; the same pages are the browser tabs the user sees in the Sidebar. "open" asks for a new page and selects it; "select" makes a page that is already open the one the other tools act on; "close" closes one page, and closing the last page stops the browser. Nothing switches the selection on its own, so a call that means to work on another page must select it first.',
+    parameters: {
+      action: {
+        type: 'string',
+        required: true,
+        enum: ['list', 'open', 'select', 'close'],
+        description: 'What to do: list the pages, open a new one, select the page the other tools act on, or close one page.',
+      },
+      targetId: { type: 'string', description: 'The page, by the id the tab list reports. Required by "select" and "close".' },
+      url: { type: 'string', description: 'Address to load in the page "open" creates; a blank page without it.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', required: true, enum: ['list', 'open', 'select', 'close'] },
+          tabs: TABS_SCHEMA,
+          targetId: { type: 'string' },
+          url: { type: 'string' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: tabsActionText(value) }],
+    },
+    async execute(args, exec) {
+      const browser = browserFor(pool, exec)
+      if (args.action === 'list') {
+        // A read is not a request for a browser: an idle one is reported as a
+        // browser with no pages, which is what the caller needs to know.
+        return { action: args.action, tabs: [...browser.status().tabs] }
+      }
+      if (args.action === 'open') {
+        const opened = await cancelable(browser, exec.signal, `opening a page${args.url === undefined ? '' : ` on ${args.url}`}`, () =>
+          browser.openPage({ ...args.url === undefined ? {} : { url: args.url } }))
+        return {
+          action: args.action,
+          tabs: [...browser.status().tabs],
+          ...opened?.targetId === undefined ? {} : { targetId: opened.targetId },
+          ...opened === undefined ? {} : { url: opened.url },
+        }
+      }
+      const targetId = args.targetId
+      if (targetId === undefined || targetId === '') {
+        throw new Error(
+          `dsh-browser: browser_tabs ${args.action} needs targetId — one of the ids the tab list reports`,
+        )
+      }
+      if (args.action === 'select') {
+        const selected = await cancelable(browser, exec.signal, `selecting page ${targetId}`, () =>
+          browser.selectPage(targetId))
+        return {
+          action: args.action,
+          tabs: [...browser.status().tabs],
+          ...selected.targetId === undefined ? {} : { targetId: selected.targetId },
+          url: selected.url,
+        }
+      }
+      const known = browser.status().tabs.some(tab => tab.targetId === targetId)
+      if (!known) {
+        throw new Error(`dsh-browser: session has no page ${targetId}; the tab list names the open ones`)
+      }
+      await cancelable(browser, exec.signal, `closing page ${targetId}`, () => browser.closePage(targetId))
+      return { action: args.action, tabs: [...browser.status().tabs], targetId }
+    },
+    timeoutMs: NAVIGATE_TIMEOUT_MS,
+  })), 'dsh-browser: browser_tabs')
 }
 
 /**

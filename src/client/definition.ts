@@ -10,9 +10,12 @@
  * A tab of this kind is addressed by the page it mirrors: one tab per browser
  * page, its address built from the page's CDP target id, so opening the same
  * page again reveals the tab that is already there and a tab survives a client
- * reload still pointing at its page. The guide entry stays a page-type open —
- * it is the one way to start a browser nobody is watching yet — and hands over
- * to the per-page tabs once pages exist.
+ * reload still pointing at its page.
+ *
+ * The guide entry is a page-type open that `multiple` keeps a tab of its own:
+ * each pick opens a pane with no page, that pane asks the host for a page, and
+ * the entry hands over to the per-page tab once the page exists. Picking it
+ * twice therefore opens two pages rather than settling on the first one.
  */
 import type { ComponentType } from 'react'
 import type { SidebarRightTabDefinition } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
@@ -52,6 +55,7 @@ export function browserDefinition(
   return {
     id: BROWSER_ID,
     kind: BROWSER_KIND,
+    multiple: true,
     priority: 'extension',
     title,
     patterns: [PAGE_PATTERN],

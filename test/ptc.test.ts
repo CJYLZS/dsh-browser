@@ -100,6 +100,9 @@ const METRICS = {
  */
 const PTC_CALLS: Readonly<Record<string, unknown>> = {
   browser_navigate: { url: 'https://example.test/form' },
+  // The tab list is read right after the page it must report, so the call table
+  // carries the invariant "what the tools see is what the browser holds".
+  browser_tabs: { action: 'list' },
   browser_snapshot: {},
   browser_click: { ref: 'e2' },
   browser_type: { ref: 'e1', value: 'a@b.c' },
@@ -365,7 +368,7 @@ function programCallingEveryTool(): string {
   ].join('\n')
 }
 
-test('the visible tool surface is exactly the six the PTC call table covers', async () => {
+test('the visible tool surface is exactly the tools the PTC call table covers', async () => {
   const h = await ptcHarness()
   // Not a count for its own sake: this is what makes the suite a gate. A new
   // tool changes this set, the table above has to gain its PTC call, and the
@@ -512,6 +515,9 @@ test('one program can drive every tool, and each answers with a value', async ()
 
   // The page's address, as a value rather than the sentence `render` writes.
   assert.equal(answers.browser_navigate?.['url'], 'https://example.test/form')
+  // The tab list is the browser's own page list: one entry per page, which is
+  // what the Sidebar's tabs are built from.
+  assert.equal(answers.browser_tabs?.['tabs']?.length, 1)
   // Reading the page is what mints the refs the next two calls used, in a
   // different sub-dispatch: refs belong to the page, not to the call.
   assert.match(String(answers.browser_snapshot?.['text']), /button "Send" \[ref=e2\]/)
@@ -992,4 +998,87 @@ test('a capture cannot ask for the whole page and one element at once', async ()
   ].join('\n'))
   assert.equal(result.failed, false)
   assert.match(String(result.value), /the whole page and one element are two different pictures/)
+})
+
+test('asking for a page gives the browser a tab of its own', async () => {
+  const h = await ptcHarness()
+  const result = await h.run([
+    'const before = await tools.browser_tabs({ action: "list" })',
+    'const first = await tools.browser_tabs({ action: "open" })',
+    'const second = await tools.browser_tabs({ action: "open", url: "https://example.test/second" })',
+    'return {',
+    '  before: before.tabs.length,',
+    '  after: second.tabs.length,',
+    '  ids: second.tabs.map(tab => tab.targetId),',
+    '  active: second.tabs.filter(tab => tab.active).map(tab => tab.url),',
+    '  opened: first.targetId,',
+    '  openedActive: first.tabs.filter(tab => tab.active).map(tab => tab.targetId),',
+    '  second: second.targetId,',
+    '}',
+  ].join('\n'))
+  assert.equal(result.failed, false, `the program failed: ${result.message}`)
+  // Each ask is a page of its own: an already-running browser gets another one
+  // rather than the page it is already showing.
+  assert.deepEqual(result.value, {
+    before: 1,
+    after: 3,
+    ids: ['target-0', 'target-1', 'target-2'],
+    active: ['https://example.test/second'],
+    opened: 'target-1',
+    openedActive: ['target-1'],
+    second: 'target-2',
+  })
+})
+
+test('selecting a page moves the page every other tool acts on', async () => {
+  const h = await ptcHarness()
+  const result = await h.run([
+    'await tools.browser_tabs({ action: "open" })',
+    'const selected = await tools.browser_tabs({ action: "select", targetId: "target-0" })',
+    'await tools.browser_evaluate({ expression: "1 + 1" })',
+    'return { selected: selected.targetId, active: selected.tabs.filter(tab => tab.active).map(tab => tab.targetId) }',
+  ].join('\n'))
+  assert.equal(result.failed, false, `the program failed: ${result.message}`)
+  assert.deepEqual(result.value, { selected: 'target-0', active: ['target-0'] })
+  // The code ran in the page that was selected, not in the one that was opened.
+  assert.ok((h.page.cdp.method('Runtime.evaluate').length ?? 0) > 0, 'the evaluation never reached the selected page')
+  assert.equal(h.launch.browsers[0]?.pages[1]?.cdp.method('Runtime.evaluate').length, 0)
+})
+
+test('closing the last page stops the browser', async () => {
+  const h = await ptcHarness()
+  const result = await h.run([
+    'const opened = await tools.browser_tabs({ action: "open" })',
+    'const closed = await tools.browser_tabs({ action: "close", targetId: opened.targetId })',
+    'const stopped = await tools.browser_tabs({ action: "close", targetId: closed.tabs[0].targetId })',
+    'return { left: closed.tabs.length, after: stopped.tabs.length }',
+  ].join('\n'))
+  assert.equal(result.failed, false, `the program failed: ${result.message}`)
+  // One page among two closes alone; the last one is the deliberate stop.
+  assert.deepEqual(result.value, { left: 1, after: 0 })
+  assert.equal(h.launch.browsers[0]?.closed, true, 'closing the last page left the browser running')
+})
+
+test('a page the browser does not hold is refused, and so is a close that names none', async () => {
+  const h = await ptcHarness()
+  const result = await h.run([
+    'const refused = {}',
+    'try { await tools.browser_tabs({ action: "select", targetId: "target-9" }); refused.select = "accepted" } catch (error) { refused.select = error.message }',
+    'try { await tools.browser_tabs({ action: "close", targetId: "target-9" }); refused.close = "accepted" } catch (error) { refused.close = error.message }',
+    'try { await tools.browser_tabs({ action: "close" }); refused.nameless = "accepted" } catch (error) { refused.nameless = error.message }',
+    'return refused',
+  ].join('\n'))
+  assert.equal(result.failed, false, `the program failed: ${result.message}`)
+  const refused = result.value as Record<string, string>
+  assert.match(refused['select'] ?? '', /has no page target-9/)
+  assert.match(refused['close'] ?? '', /has no page target-9/)
+  assert.match(refused['nameless'] ?? '', /needs targetId/)
+})
+
+test('reading the tab list is a read, not a request for a browser', async () => {
+  const h = await ptcHarness({ warm: false })
+  const result = await h.run('return await tools.browser_tabs({ action: "list" })')
+  assert.equal(result.failed, false, `the program failed: ${result.message}`)
+  assert.deepEqual(result.value, { action: 'list', tabs: [] })
+  assert.equal(h.launch.browsers.length, 0, 'reading the tab list started a browser')
 })

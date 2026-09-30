@@ -65,6 +65,36 @@ export async function browserStatus(): Promise<ClientBrowserReport> {
 }
 
 /**
+ * Ask the host for a new page in one session's browser.
+ *
+ * The Sidebar's browser entry is the caller: the pane that asks exists to hold
+ * the page this produces, and one ask is one page — a browser already running
+ * gets another blank one rather than the tab that is already there.
+ * `request` is the asking tab's own id, so a pane remounted by a tab switch, a
+ * Session change, or a client reload is the same ask and opens nothing new.
+ * @param sessionId - the session whose browser should open a page.
+ * @param request - the asking tab's id.
+ * @param url - address to load in the new page; a blank page when absent.
+ * @returns the new page's CDP target id, when the host named it.
+ * @throws {Error} when the route refuses or the browser cannot start.
+ */
+export async function openPageRequest(sessionId: string, request: string, url?: string): Promise<string | undefined> {
+  const response = await fetch('/dsh-browser/pages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'open',
+      sessionId,
+      request,
+      ...url === undefined ? {} : { url },
+    }),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const answer = await response.json() as { targetId?: unknown }
+  return typeof answer.targetId === 'string' ? answer.targetId : undefined
+}
+
+/**
  * Ask the host to close one browser page.
  *
  * This is what closing a sidebar tab does to the page it mirrored: the tab's

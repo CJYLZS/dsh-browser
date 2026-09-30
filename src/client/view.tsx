@@ -12,6 +12,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
 import type { SidebarRightTabInfo, UseSidebarRightTabInfo } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import { openPageRequest } from './api.ts'
 import { clipboardChord, clipboardReply, pasteMessage, type ReadingChord } from './clipboard.ts'
 import { AddressGlobe } from './glyph.ts'
 import { keyMessage } from './keys.ts'
@@ -286,6 +287,12 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
   // this pane is on.
   const tab: SidebarRightTabInfo | undefined = useTabInfo?.()
   const pageId = tab === undefined ? undefined : targetIdOf(tab.tab.contentId)
+  /**
+   * The tab's own id, which is what a pane with no page asks under: the ask is
+   * the tab's, so the same tab asking again — remounted by a tab switch, a
+   * Session change, or a client reload — opens nothing new.
+   */
+  const tabId = tab === undefined ? undefined : tab.tab.id
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const socketRef = useRef<WebSocket | undefined>(undefined)
   const lastMoveRef = useRef(0)
@@ -327,6 +334,13 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
     // its input, and its address bar are the page's whether or not the tools
     // act on it right now.
     if (pageId !== undefined) query.set('page', pageId)
+    // A pane with no page is the browser entry's own: it exists to hold the page
+    // this ask produces, so it asks for one. This is the only thing that opens a
+    // page on the user's behalf — a browser already running gets a tab of its
+    // own here rather than the one that is already there.
+    if (pageId === undefined && tabId !== undefined) {
+      void openPageRequest(sessionId, tabId).catch(() => {})
+    }
     const socket = new WebSocket(`${scheme}//${location.host}${STREAM_PATH}?${query.toString()}`)
     socket.binaryType = 'arraybuffer'
     socket.onopen = () => { setConnected(true) }
@@ -359,7 +373,7 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
       socketRef.current = undefined
       socket.close()
     }
-  }, [drawFrame, sessionId, pageId])
+  }, [drawFrame, sessionId, pageId, tabId])
 
   // The agent drives the same browser, so the address bar follows the page
   // rather than owning it.

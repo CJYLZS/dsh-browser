@@ -1168,6 +1168,35 @@ async function main() {
     check('a target selector reaches into a same-origin frame',
       /Inner control/.test(inFrame.text), flat(inFrame.text))
 
+    log('\n[31] an ask opens a page of its own, and a selection moves the tools')
+    const beforeAsks = browser.status().tabs
+    const firstAsk = await step('ask for a new page', 30_000, () => browser.openPage())
+    const secondAsk = await step('ask for another new page', 30_000, () => browser.openPage())
+    // The rule the browser entry depends on: a browser that is already running
+    // gets one MORE page per ask, never the page it is already showing.
+    check('each ask is a page of its own, not the one already there',
+      typeof firstAsk?.targetId === 'string' && typeof secondAsk?.targetId === 'string'
+      && firstAsk.targetId !== secondAsk.targetId,
+      JSON.stringify({ first: firstAsk?.targetId ?? null, second: secondAsk?.targetId ?? null }))
+    check('the tab list grew by exactly the two pages that were asked for',
+      browser.status().tabs.length === beforeAsks.length + 2,
+      JSON.stringify(browser.status().tabs.map(tab => tab.targetId ?? null)))
+    const target = browser.status().tabs[0]?.targetId ?? ''
+    const selected = await step('select the first page for the tools', 30_000, () => browser.selectPage(target))
+    const active = browser.status().tabs.filter(tab => tab.active)
+    check('selecting a page moves the one the tools act on, and only that',
+      selected.targetId === target && active.length === 1 && active[0]?.targetId === target,
+      JSON.stringify(browser.status().tabs.map(tab => ({ id: tab.targetId, active: tab.active }))))
+    const twice = await step('ask twice under one record', 30_000, async () => ({
+      first: await browser.openPage({ request: 'regression-entry' }),
+      second: await browser.openPage({ request: 'regression-entry' }),
+    }))
+    // A pane remounted by a tab switch or a client reload is the same ask: it
+    // must answer with the page it already opened rather than a third one.
+    check('one record asking twice is one page',
+      twice.first?.targetId !== undefined && twice.first.targetId === twice.second?.targetId,
+      JSON.stringify({ first: twice.first?.targetId ?? null, second: twice.second?.targetId ?? null }))
+
   } finally {
     await browser.close().catch(() => {})
     await rm(userDataDir, { recursive: true, force: true }).catch(() => {})

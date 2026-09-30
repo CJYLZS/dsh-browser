@@ -302,7 +302,13 @@ export function fakeLauncher(): FakeLaunch {
     }))
     const context = {
       pages: () => pages.filter(entry => !entry.closed).map(entry => entry.page),
-      newPage: async () => createPage('about:blank').page,
+      // Playwright announces every page the context creates, `newPage()`
+      // included, and the plugin's adoption is driven by that announcement.
+      newPage: async () => {
+        const created = createPage('about:blank')
+        events.emit('page', created.page)
+        return created.page
+      },
       newCDPSession: async (page: Page) => {
         const record = pages.find(entry => entry.page === page)
         if (record === undefined) throw new Error('dsh-browser test: not a page of this context')

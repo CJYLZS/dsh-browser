@@ -69,12 +69,13 @@ function mentionedRecipes(): string[] {
   return [...SHIPPED.matchAll(/`(references\/[A-Za-z0-9._-]+\.md)`/gu)].map(match => match[1] as string)
 }
 
-test('the guidance describes the tools that exist, not only the first six', () => {
+test('the guidance describes the tools that exist, not only the first few', () => {
   const skill = parseSkillFile(SHIPPED)
   // The count in the opening paragraph is prose, and prose goes stale: it said
-  // "six tools" for two rounds after the seventh arrived.
-  assert.match(skill.content, /Eight tools drive it/um)
-  for (const tool of ['browser_snapshot', 'browser_click', 'browser_type', 'browser_evaluate', 'browser_wait', 'browser_console', 'browser_screenshot']) {
+  // "six tools" for two rounds after the seventh arrived, and "eight" once the
+  // ninth did.
+  assert.match(skill.content, /Nine tools drive it/um)
+  for (const tool of ['browser_snapshot', 'browser_click', 'browser_type', 'browser_evaluate', 'browser_wait', 'browser_console', 'browser_screenshot', 'browser_tabs']) {
     assert.match(skill.content, new RegExp(tool, 'u'), `the guidance never mentions ${tool}`)
   }
 })

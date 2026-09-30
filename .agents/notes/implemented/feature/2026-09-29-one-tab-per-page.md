@@ -20,7 +20,7 @@ Status: implemented
 
 ## 为什么是"资源地址"而不是页面型标签
 
-harness 的两种开法里，页面型标签（`openTab`）的地址是打开时 mint 的随机 UUID，恢复布局后 navigation 记录为空（revision 0），对账无从知道这个标签指哪个页面；资源地址则把身份放进 `contentId` 本身，恢复、去重、重连都靠它。代价是要登记 `patterns` 并让 `canOpen` 守住自家的前缀——已做（`dsh-resource://dsh-browser-page/**`）。引导页入口保留页面型开法：它是"起一台没人看的浏览器"的唯一入口，页面标签出现后由对账让位。
+harness 的两种开法里，页面型标签（`openTab`）的地址是打开时 mint 的随机 UUID，恢复布局后 navigation 记录为空（revision 0），对账无从知道这个标签指哪个页面；资源地址则把身份放进 `contentId` 本身，恢复、去重、重连都靠它。代价是要登记 `patterns` 并让 `canOpen` 守住自家的前缀——已做（`dsh-resource://dsh-browser-page/**`）。引导页入口保留页面型开法：它是"起一台没人看的浏览器"的唯一入口，页面标签出现后由对账让位——后来这张入口改成**每次点击都向 host 要一个新页面**（含 `multiple`，见[那一篇](2026-09-30-browser-entry-opens-a-page.md)），让位规则不变。
 
 ## Alternatives considered
 
@@ -56,3 +56,4 @@ harness 的两种开法里，页面型标签（`openTab`）的地址是打开时
 - 旧语义（观察窗、`userClosed` 的来历）：[面板跟着浏览器走](2026-09-24-pane-follows-the-browser.md)——其决定 1 仍然成立，2 与 3 被本篇取代。
 - 多标签与页面生命周期的事实基础：[那一篇](../architecture/2026-09-23-multi-tab-and-page-lifecycle.md)。
 - 本轮真机验证与九项缺陷的来源：[真机过一遍](../testing/2026-09-29-real-page-verification.md)。
+- 入口的"每次点击一个页面"与 `browser_tabs`：[那一篇](2026-09-30-browser-entry-opens-a-page.md)（部分取代本篇最后关于入口的那一句）。

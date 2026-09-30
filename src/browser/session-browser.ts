@@ -1833,6 +1833,16 @@ export class SessionBrowser {
   /** What each page last said its title was, by target id. */
   private readonly titles = new Map<string, string>()
   /**
+   * The page a viewer's ask for a new page already produced, by the asking
+   * record's id.
+   *
+   * The Sidebar tab that asks is the record: the same tab asking again — a pane
+   * remounted by a tab switch, a Session change, or a client reload — is one ask
+   * that has already been answered, not a second page. The answer is the page's
+   * target id, so a page that is gone makes the next ask an open again.
+   */
+  private readonly openRequests = new Map<string, string>()
+  /**
    * One mirror per page someone is watching, by target id.
    *
    * A viewer names the page it wants, so two panes on two pages run two screen
@@ -1925,9 +1935,14 @@ export class SessionBrowser {
     }
   }
 
-  /** The current status snapshot. */
+  /**
+   * The current status snapshot.
+   *
+   * The tab list is the pages this browser can name and no others — the same
+   * list the Sidebar's tabs are built from, and the same one a tool result
+   * carries, so what the user sees and what the model is told are one list.
+   */
   status(): BrowserStatus {
-    const pages = this.session?.context.pages() ?? []
     return {
       sessionId: this.sessionId,
       state: this.state,
@@ -1937,16 +1952,7 @@ export class SessionBrowser {
       mode: this.launchedHeadless === undefined
         ? undefined
         : this.launchedHeadless ? 'headless' : 'headful',
-      tabs: pages.map((page, index) => {
-        const targetId = this.pageIds.get(page)
-        return {
-          index,
-          url: page.url(),
-          active: page === this.page,
-          ...(targetId === undefined ? {} : { targetId }),
-          ...(targetId === undefined ? {} : { title: this.titles.get(targetId) ?? '' }),
-        }
-      }),
+      tabs: this.namedPages(),
       error: this.reason,
     }
   }
@@ -1973,21 +1979,57 @@ export class SessionBrowser {
    * @returns one entry per nameable page, in the browser's own order.
    */
   async pageTabs(): Promise<TabSummary[]> {
-    const pages = this.session?.context.pages() ?? []
-    const named: { page: Page; index: number; targetId: string }[] = []
-    for (const [index, page] of pages.entries()) {
-      const targetId = this.pageIds.get(page)
-      if (targetId !== undefined) named.push({ page, index, targetId })
-    }
+    const named = this.namedPages()
     if (named.length === 0) return []
     const fresh = await this.targetTitles()
-    return named.map(({ page, index, targetId }) => ({
+    return named.map(tab => ({ ...tab, title: fresh.get(tab.targetId ?? '') ?? tab.title ?? '' }))
+  }
+
+  /**
+   * The pages this browser can name, in its own page order.
+   *
+   * A page whose target id is not known yet is left out: a Sidebar tab is
+   * addressed by that id, so a page without one is a page no tab can open, and
+   * listing it would promise one that cannot exist. The position an entry
+   * carries is the page's place in the browser's whole list, which is what the
+   * browser's own tab order means.
+   * @returns one entry per nameable page.
+   */
+  private namedPages(): TabSummary[] {
+    const pages = this.session?.context.pages() ?? []
+    const named: TabSummary[] = []
+    for (const [index, page] of pages.entries()) {
+      const tab = this.summaryOf(page, index)
+      if (tab !== undefined) named.push(tab)
+    }
+    return named
+  }
+
+  /**
+   * One page as the tab list describes it.
+   * @param page - the page.
+   * @param index - its place in the browser's whole page list.
+   * @returns the entry, or `undefined` for a page the browser has not named.
+   */
+  private summaryOf(page: Page, index: number): TabSummary | undefined {
+    const targetId = this.pageIds.get(page)
+    if (targetId === undefined) return undefined
+    return {
       index,
       url: page.url(),
       active: page === this.page,
       targetId,
-      title: fresh.get(targetId) ?? this.titles.get(targetId) ?? '',
-    }))
+      title: this.titles.get(targetId) ?? '',
+    }
+  }
+
+  /**
+   * One page's entry, positioned by the browser's own list.
+   * @param page - the page, which the browser must hold.
+   * @returns the entry, or `undefined` for a page the browser has not named.
+   */
+  private summaryOfPage(page: Page): TabSummary | undefined {
+    return this.summaryOf(page, (this.session?.context.pages() ?? []).indexOf(page))
   }
 
   /**
@@ -3973,6 +4015,75 @@ export class SessionBrowser {
   }
 
   /**
+   * Open a page and make it the one tools act on.
+   *
+   * A browser that is not running is started, and the page it comes up on is
+   * the page this returns: a browser and a first page are one answer, not two.
+   * A browser that is already running gets a new blank page beside the others.
+   * This is what the Sidebar's browser entry asks for, so each ask is a tab of
+   * its own rather than the tab that is already there.
+   *
+   * `request` names the record that asked, so the same record asking again — a
+   * pane remounted by a tab switch, a Session change, or a client reload — gets
+   * the page it already opened instead of a second one. A page that is gone
+   * makes the next ask from that record an open again.
+   * @param options - the address to load in the new page, and the asking record.
+   * @returns the page as the tab list describes it, or `undefined` when the
+   *   browser did not name it — a page no tab can carry.
+   * @throws {Error} when the browser cannot be started.
+   */
+  async openPage(options: { url?: string; request?: string } = {}): Promise<TabSummary | undefined> {
+    const { request } = options
+    if (request !== undefined) {
+      const remembered = this.openRequests.get(request)
+      if (remembered !== undefined) {
+        const held = this.pageByTargetId(remembered)
+        if (held !== undefined) return this.summaryOfPage(held)
+        this.openRequests.delete(request)
+      }
+    }
+    const running = this.state === 'ready'
+    await this.ensure()
+    const context = this.session?.context
+    if (context === undefined) throw new Error(this.unusable())
+    // A browser this call started already has the page it came up on: asking for
+    // a browser and for a page at the same moment is that page, not an extra
+    // blank beside it.
+    const page = running ? await context.newPage() : this.requirePage()
+    await this.adopt(page)
+    if (options.url !== undefined) await this.navigate(options.url)
+    const summary = this.summaryOfPage(page)
+    if (request !== undefined && summary?.targetId !== undefined) {
+      this.openRequests.set(request, summary.targetId)
+    }
+    return summary
+  }
+
+  /**
+   * Make one named page the page tools act on.
+   *
+   * A pane's mirror does not decide this: a tab watches the page it names, and
+   * the tools address the page that was selected here. Selecting the page
+   * already selected changes nothing, so what that page said about itself
+   * survives a selection that moves nothing.
+   * @param targetId - the page's CDP target id, as the tab list reports it.
+   * @returns the page as the tab list describes it.
+   * @throws {Error} when no page by that id exists.
+   */
+  async selectPage(targetId: string): Promise<TabSummary> {
+    const page = this.pageByTargetId(targetId)
+    if (page === undefined) {
+      throw new Error(`dsh-browser: session ${this.sessionId} has no page ${targetId}`)
+    }
+    if (page !== this.page) await this.adopt(page)
+    const summary = this.summaryOfPage(page)
+    if (summary === undefined) {
+      throw new Error(`dsh-browser: session ${this.sessionId} no longer names page ${targetId}`)
+    }
+    return summary
+  }
+
+  /**
    * Open an address in one named page — the pane's own address bar, which acts
    * on the page it mirrors, not on whichever page the tools act on.
    * @param targetId - the page's CDP target id.
@@ -4012,6 +4123,8 @@ export class SessionBrowser {
       for (const targetId of [...this.mirrors.keys()]) this.dropMirror(targetId)
       this.pageIds.clear()
       this.titles.clear()
+      this.openRequests.clear()
+      this.adoptingPage = undefined
       void this.browserCdp?.detach().catch(() => {})
       this.browserCdp = undefined
       const session = this.session
@@ -4135,6 +4248,11 @@ export class SessionBrowser {
    * @returns when the page is the one tools and mirror act on.
    */
   private adopt(page: Page): Promise<void> {
+    // A caller that opens a page and the context's own announcement of it are
+    // one adoption: both arrive here with the same page, and the second joins
+    // the first rather than attaching a second CDP session to it.
+    if (this.adoptingPage === page) return this.adoption
+    this.adoptingPage = page
     const running = this.adopting(page)
     this.adoption = running
     return running
@@ -4142,6 +4260,9 @@ export class SessionBrowser {
 
   /** The adoption running right now, if one is; resolved when none is. */
   private adoption: Promise<void> = Promise.resolve()
+
+  /** The page that adoption is for; cleared when the browser lets its pages go. */
+  private adoptingPage: Page | undefined
 
   /** Do the work of `adopt`, which keeps it as the session's current adoption. */
   private async adopting(page: Page): Promise<void> {
@@ -4285,6 +4406,8 @@ export class SessionBrowser {
     for (const targetId of [...this.mirrors.keys()]) this.dropMirror(targetId)
     this.pageIds.clear()
     this.titles.clear()
+    this.openRequests.clear()
+    this.adoptingPage = undefined
     void this.browserCdp?.detach().catch(() => {})
     this.browserCdp = undefined
     this.session = undefined

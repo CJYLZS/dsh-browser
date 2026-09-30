@@ -20,7 +20,7 @@ import type {} from '@deepseek-ai/dsh-skill'
 import { BrowserPool } from './browser/pool.ts'
 import { registerStream } from './view/server.ts'
 import { registerStatus } from './view/status.ts'
-import { registerPageClose } from './view/pages.ts'
+import { registerPages } from './view/pages.ts'
 import { registerTools } from './tools/index.ts'
 import { installSettings } from './settings.ts'
 import { browserSkill } from './skill.ts'
@@ -60,7 +60,7 @@ export function apply(ctx: Context, config: BrowserConfigInput): void {
   installSettings(ctx, resolve, pool)
   registerStream(ctx, pool)
   registerStatus(ctx, pool)
-  registerPageClose(ctx, pool)
+  registerPages(ctx, pool)
   registerTools(ctx, pool)
   // The guidance is contributed as a skill rather than as more tool
   // description: it is worth reading once per task, not once per call. A

@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { actionText, changedText, changesText, consoleText, evaluateText, readable, shotBlocks, shotText, snapshotText, tabsText, waitText } from '../src/tools/index.ts'
+import { actionText, changedText, changesText, consoleText, evaluateText, readable, shotBlocks, shotText, snapshotText, tabsActionText, tabsText, waitText } from '../src/tools/index.ts'
 import type { ActionReport, TabSummary } from '../src/browser/session-browser.ts'
 import type { ImageRef } from '../src/tools/attach.ts'
 
@@ -18,8 +18,8 @@ const REF: ImageRef = { attachmentId: 'att-1', mediaType: 'image/jpeg', bytes: 1
 
 /** The pages a result carries, with the second one active. */
 const TABS: TabSummary[] = [
-  { index: 0, url: 'https://example.test/first', active: false },
-  { index: 1, url: 'https://example.test/second', active: true },
+  { index: 0, url: 'https://example.test/first', active: false, targetId: 'target-0', title: 'First' },
+  { index: 1, url: 'https://example.test/second', active: true, targetId: 'target-1', title: 'Second' },
 ]
 
 /**
@@ -75,8 +75,8 @@ test('a click result names the element, the address, and the outcome', () => {
       'Page: https://example.test/form — "Form"',
       'The page changed: dom.',
       '',
-      '[0] https://example.test/first',
-      '[active] https://example.test/second',
+      '[0] target-0 https://example.test/first',
+      '[active] target-1 https://example.test/second',
     ].join('\n'),
   )
 })
@@ -185,8 +185,8 @@ test('a wait result says it matched, and what matched', () => {
       'Waited 0.3 s — button "Send" is on the page.',
       'Page: https://example.test/form — "Form"',
       '',
-      '[0] https://example.test/first',
-      '[active] https://example.test/second',
+      '[0] target-0 https://example.test/first',
+      '[active] target-1 https://example.test/second',
     ].join('\n'),
   )
 })
@@ -268,8 +268,8 @@ test('a snapshot result is headed by where in the page it was taken', () => {
     '- RootWebArea "Form"',
     '  - button "Send" [ref=e1]',
     '',
-    '[0] https://example.test/first',
-    '[active] https://example.test/second',
+    '[0] target-0 https://example.test/first',
+    '[active] target-1 https://example.test/second',
   ].join('\n'))
 })
 
@@ -286,8 +286,44 @@ test('a spilled snapshot returns the path and how to read it', () => {
 })
 
 test('a page list says which page the tools act on, or that there are none', () => {
-  assert.equal(tabsText(TABS), '[0] https://example.test/first\n[active] https://example.test/second')
+  // The id leads each line because it is what a later call copies: selecting
+  // and closing pages name one by the id the browser gave it.
+  assert.equal(
+    tabsText(TABS),
+    '[0] target-0 https://example.test/first\n[active] target-1 https://example.test/second',
+  )
   assert.equal(tabsText([]), 'No pages are open.')
+  // A page the browser has not named yet has no id to print, and saying so is
+  // better than printing a line that looks like a page a call could name.
+  assert.equal(
+    tabsText([{ index: 2, url: 'about:blank', active: false }]),
+    '[2] - about:blank',
+  )
+})
+
+test('a tabs result says what each action did and lists the pages after it', () => {
+  assert.equal(
+    tabsActionText({ action: 'list', tabs: TABS }),
+    '[0] target-0 https://example.test/first\n[active] target-1 https://example.test/second',
+  )
+  assert.equal(
+    tabsActionText({ action: 'list', tabs: [] }),
+    'No pages are open. `open` starts the browser and gives it one.',
+  )
+  assert.equal(
+    tabsActionText({ action: 'open', tabs: TABS, targetId: 'target-1', url: 'https://example.test/second' }),
+    'Opened a new page on https://example.test/second. Its id is target-1.\n\n'
+      + '[0] target-0 https://example.test/first\n[active] target-1 https://example.test/second',
+  )
+  assert.equal(
+    tabsActionText({ action: 'select', tabs: TABS, targetId: 'target-0', url: 'https://example.test/first' }),
+    'Now acting on page target-0 (https://example.test/first).\n\n'
+      + '[0] target-0 https://example.test/first\n[active] target-1 https://example.test/second',
+  )
+  assert.equal(
+    tabsActionText({ action: 'close', tabs: [], targetId: 'target-1' }),
+    'Closed page target-1. That was the last page, so the browser stopped.\n\nNo pages are open.',
+  )
 })
 
 test('a result says which dialog the page asked and how it was answered', () => {

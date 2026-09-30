@@ -2150,6 +2150,86 @@ test('an ambiguous locator hands back a ref for every candidate it lists', async
   })
 })
 
+test('asking for a page on a browser that is not running starts it on that page', async () => {
+  const { browser, launch } = harness()
+  const opened = await browser.openPage()
+  assert.equal(launch.browsers.length, 1)
+  // A browser and its first page are one answer: the page the browser comes up
+  // on is the page the ask asked for.
+  assert.equal(browser.status().tabs.length, 1)
+  assert.deepEqual(opened, browser.status().tabs[0])
+  assert.equal(opened?.active, true)
+})
+
+test('asking a running browser for a page adds one and makes it the page tools act on', async () => {
+  const { browser } = await started()
+  const opened = await browser.openPage()
+  const tabs = browser.status().tabs
+  assert.equal(tabs.length, 2, 'a second ask did not open a second page')
+  assert.deepEqual(tabs.map(tab => tab.active), [false, true])
+  assert.equal(opened?.targetId, tabs[1]?.targetId)
+})
+
+test('one record asking twice gets the page it already asked for', async () => {
+  const { browser } = await started()
+  const first = await browser.openPage({ request: 'tab-1' })
+  const again = await browser.openPage({ request: 'tab-1' })
+  // A pane remounted by a tab switch, a Session change, or a client reload is
+  // the same ask: it must not leave a stray page behind.
+  assert.equal(browser.status().tabs.length, 2)
+  assert.deepEqual(again, first)
+})
+
+test('a record whose page is gone asks for a new one', async () => {
+  const { browser } = await started()
+  const opened = await browser.openPage({ request: 'tab-1' })
+  const targetId = opened?.targetId
+  assert.ok(targetId !== undefined)
+  await browser.closePage(targetId)
+  const again = await browser.openPage({ request: 'tab-1' })
+  assert.equal(browser.status().tabs.length, 2, 'the page left beside the one that closed, plus the new one')
+  assert.notEqual(again?.targetId, targetId)
+})
+
+test('a page asked for with an address comes up on it', async () => {
+  const { browser } = await started()
+  const opened = await browser.openPage({ url: 'https://example.test/second' })
+  assert.equal(opened?.url, 'https://example.test/second')
+  // An ask is one page whatever it was asked to load: the address is part of
+  // the ask, not a second page.
+  assert.equal(browser.status().tabs.length, 2)
+  // A tab list's titles are what adoption remembered, so a fresh one is the
+  // status route's business — that is what `pageTabs` reads.
+  assert.equal((await browser.pageTabs()).find(tab => tab.active)?.title, 'title of https://example.test/second')
+})
+
+test('selecting a page moves the page tools act on without opening another', async () => {
+  const { browser } = await started()
+  const first = browser.status().tabs[0]
+  assert.ok(first?.targetId !== undefined)
+  await browser.openPage()
+  const selected = await browser.selectPage(first.targetId)
+  assert.equal(selected.active, true)
+  assert.deepEqual(browser.status().tabs.map(tab => tab.active), [true, false])
+  assert.equal(browser.status().tabs.length, 2)
+  assert.equal((await browser.pageTabs()).length, 2, 'a selection is not a page')
+})
+
+test('selecting a page the browser does not hold is refused', async () => {
+  const { browser } = await started()
+  await assert.rejects(() => browser.selectPage('target-9'), /has no page target-9/)
+})
+
+test('a page the record already asked for is remembered by its id, not by the ask', async () => {
+  const { browser } = await started()
+  const opened = await browser.openPage({ request: 'tab-1' })
+  // The page the ask produced is the one a repeat answers with, and a page that
+  // was closed under that record is not.
+  assert.deepEqual(await browser.openPage({ request: 'tab-1' }), opened)
+  await browser.closePage(String(opened?.targetId))
+  assert.notDeepEqual(await browser.openPage({ request: 'tab-1' }), opened)
+})
+
 test('candidates with no name are not told to narrow by a name they do not have', async () => {
   const { browser, page } = await started()
   page.cdp.answers.set('Accessibility.getFullAXTree', {
