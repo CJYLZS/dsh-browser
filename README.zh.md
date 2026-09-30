@@ -72,10 +72,10 @@ dsh 在 0.1.7-rc.1 改掉了设置模型，且没有兼容层。插件页面现�
 
 这个分叉落在客户端半边的 import 上，因此一份构建无法同时针对两个世代，插件按世代配对：
 
-- **v0.2.x → dsh ≥ 0.1.7-rc.1**，声明为 `peerDependencies: >=0.1.7-rc.1 <0.2.0`。设置页的字段在 schema 上标为 volatile，编辑经 `loader/volatile-update` 抵达正在运行的浏览器。
+- **v0.2.x → dsh ≥ 0.1.7-rc.1**，声明为 `peerDependencies: >=0.1.7-rc.1`，不封顶，所以同一份构建能跑在它实测过的整条 0.2.0 线上（[为什么去掉封顶](.agents/notes/implemented/process/2026-09-30-peer-range-floor-only.md)）。设置页的字段在 schema 上标为 volatile，编辑经 `loader/volatile-update` 抵达正在运行的浏览器。
 - **v0.1.x → dsh 0.1.5-rc.2**，声明为 `peerDependencies: ^0.1.5-rc.2`。设置页注册 namespace scope 并自行渲染控件。
 
-版本配错会明确失败：dsh 拒绝激活 dsh peer 版本不满足的插件，并报出插件名与未满足的区间。
+版本旧了会明确失败：只有当插件的 dsh peer 满足声明的区间时 dsh 才激活它，否则报出插件名与未满足的区间。更高的世代会被这条检查放行，所以这份构建在某一代上还跑不跑得起来，是验证的问题而不是版本号的问题。
 
 <a id="usage"></a>
 ## 使用
@@ -186,7 +186,7 @@ dsh 在 0.1.7-rc.1 改掉了设置模型，且没有兼容层。插件页面现�
 <a id="dev-note"></a>
 ## 开发
 
-插件目录是自包含的 pnpm workspace（`packages: [- .]`、`storeDir: .pnpm-store`），因此 pnpm 够不到 harness 仓库的 workspace。dsh 框架包声明为 `peerDependencies`（`>=0.1.7-rc.1 <0.2.0`，由 host profile 提供），并在 `devDependencies` 里精确钉住，供本地类型与构建使用。
+插件目录是自包含的 pnpm workspace（`packages: [- .]`、`storeDir: .pnpm-store`），因此 pnpm 够不到 harness 仓库的 workspace。dsh 框架包声明为 `peerDependencies`（`>=0.1.7-rc.1`，由 host profile 提供），并在 `devDependencies` 里精确钉住，供本地类型与构建使用。
 
 想跑本地检出而不是 tag，就把它链接进 profile——之后 `pnpm run build` 的产物在下次重启 harness 时生效，不必重新 add：
 

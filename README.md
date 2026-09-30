@@ -72,10 +72,10 @@ dsh changed its settings model in 0.1.7-rc.1 with no compatibility layer. A plug
 
 That fork is in the client half's imports, so one build cannot target both generations and the plugin pairs by generation:
 
-- **v0.2.x → dsh ≥ 0.1.7-rc.1**, declared as `peerDependencies: >=0.1.7-rc.1 <0.2.0`. The settings page's fields are marked volatile in the schema, and an edit reaches the running browsers through `loader/volatile-update`.
+- **v0.2.x → dsh ≥ 0.1.7-rc.1**, declared as `peerDependencies: >=0.1.7-rc.1` with no upper bound, so one build runs on the whole 0.2.0 line it is verified against ([why the cap went away](.agents/notes/implemented/process/2026-09-30-peer-range-floor-only.md)). The settings page's fields are marked volatile in the schema, and an edit reaches the running browsers through `loader/volatile-update`.
 - **v0.1.x → dsh 0.1.5-rc.2**, declared as `peerDependencies: ^0.1.5-rc.2`. The settings page registers a namespace scope and renders its own controls.
 
-A mismatched pair fails loudly: dsh refuses to activate a plugin whose dsh peers its version does not satisfy, naming the plugin and the unsatisfied ranges.
+An older dsh fails loudly: dsh activates a plugin only when its dsh peers satisfy the declared ranges, and names the plugin and the unsatisfied ranges when they do not. A later generation passes that check, so whether this build still runs on one is a question for verification rather than for the version number.
 
 <a id="usage"></a>
 ## Usage
@@ -186,7 +186,7 @@ Screenshots are written to a file, and the path comes back so it is durable in t
 <a id="dev-note"></a>
 ## Dev Note
 
-The plugin directory is a self-contained pnpm workspace (`packages: [- .]`, `storeDir: .pnpm-store`) so pnpm cannot reach the harness repository's workspace. dsh framework packages are `peerDependencies` (`>=0.1.7-rc.1 <0.2.0`, supplied by the host profile) and pinned exactly in `devDependencies` for local types and builds.
+The plugin directory is a self-contained pnpm workspace (`packages: [- .]`, `storeDir: .pnpm-store`) so pnpm cannot reach the harness repository's workspace. dsh framework packages are `peerDependencies` (`>=0.1.7-rc.1`, supplied by the host profile) and pinned exactly in `devDependencies` for local types and builds.
 
 To run a local checkout instead of a tag, link it into the profile — later `pnpm run build` runs apply on the next harness restart without re-adding:
 

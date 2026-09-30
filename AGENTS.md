@@ -38,9 +38,9 @@
 - 需要全仓范围时先用 `--glob` / `-t` 收窄文件类型，并且说清为什么必须全仓。找某个东西的位置时用 `rg -l` 只列文件，比打印匹配内容便宜。
 - 一律 `rg -n` 带行号，方便直接引用 `file:line`，不要事后再用 `sed`/`cat` 补行号。
 
-## 目标版本：0.1.7-rc.1（已迁移）
+## 目标版本：0.2.0-rc.2（peer 只留地板）
 
-按仓库当前 checkout 的 **0.1.7-rc.1** 开发，`package.json` 的 peer 与 dev 依赖都是这个区间（`>=0.1.7-rc.1 <0.2.0`）。0.1.5-rc.2 时期列过的差异已不再是差异：`SidebarRightTabDefinition.multiple` / `keepMounted`、`ctx.browserUse`（`packages/browser-use`）、`ui-sidebar-terminal` / `ui-sidebar-browser` 都在这个 checkout 里（后两者 web-app 已装）。
+按仓库当前 checkout 的 **0.2.0-rc.2** 开发与实测（Web profile 与 Desktop 的 Electron 应用都是这个版本）；`package.json` 的 peer 声明是 `>=0.1.7-rc.1`，不封顶——封顶会拒掉同一条线上的更高版本，理由与代价见[那一篇](.agents/notes/implemented/process/2026-09-30-peer-range-floor-only.md)，dev 依赖仍精确钉在 0.1.7-rc.1（本地类型与构建用）。0.1.5-rc.2 时期列过的差异已不再是差异：`SidebarRightTabDefinition.multiple` / `keepMounted`、`ctx.browserUse`（`packages/browser-use`）、`ui-sidebar-terminal` / `ui-sidebar-browser` 都在这个 checkout 里（后两者 web-app 已装）。
 
 **不要用本 checkout 的源码去否定另一份写自其它版本的说明**：仓库里查不到某个 API 只说明它不在这个版本，不等于它不存在。判存在性用 `npm view @deepseek-ai/<pkg> versions`，不要只靠本地 `rg`。
 
