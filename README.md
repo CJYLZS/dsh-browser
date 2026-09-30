@@ -2,30 +2,31 @@
 
 English | [中文](README.zh.md)
 
-<img src="docs/img/preview_en.png" alt="dsh-browser in the DeepSeek Harness web GUI: the agent's browser tool calls on the left, the same browser mirrored in the right sidebar on the right" width="100%">
+<img src="docs/img/preview_en.png" alt="The plugin at work: the agent's browser tool calls beside the same browser mirrored in the sidebar" width="100%">
 
 <p align="center">
-  <img src="docs/img/settings_en.png" alt="The browser settings section: one running instance per session with its own CDP port, window mode, automation markers, and profile location" width="45%">
+  <img src="docs/img/settings_en.png" alt="The browser settings: one running instance per conversation with its own CDP port, window mode, automation markers, and profile location" width="45%">
 </p>
+
+**A real local browser for every conversation.** The agent opens pages and works in them while the sidebar mirrors the same browser, so you can watch the work happen and take over whenever you want. It runs in both the Web and the Desktop interface.
 
 ## Summary
 
-It runs on both surfaces: the DeepSeek Harness Web GUI and the Desktop app. The sidebar pane, the settings section, the nine tools, and each browser's external CDP port behave the same in either; the platform difference is the install route and where the pane draws its stream from — a Desktop window is the shell's own `dsh-app://app` document, so the pane dials the Host origin that shell publishes rather than the document's own.
-
-This plugin gives every DeepSeek Harness conversation its own real local browser: Chrome or Edge runs as a separate process with its own profile and its own CDP port, the agent drives it with nine tools, and the right sidebar mirrors it so you can watch and operate the same pages. Nothing is shared between conversations — not the tabs, not the cookies, not the port.
+Chrome or Edge runs as its own process, with its own profile and its own CDP port, and every conversation gets its own: tabs, sign-ins, and ports are never shared between conversations. The agent drives it with nine tools, and the sidebar shows the same pages — either side can act on them.
 
 It is not an embedded web view. The page runs in an ordinary browser process, so sites see a normal browser, DevTools or another Playwright can attach to it while the mirror is live, and closing the harness does not leave a browser pretending to be part of the app.
 
 <a id="highlights"></a>
 ## Highlights
 
-- **Web and Desktop, one build.** It serves the Web GUI and the Desktop app alike: the pane mirrors the browser and the tools drive it in both. Only the install route and the pane's stream origin differ.
-- **One browser per conversation.** Isolation is enforced on both paths: the sidebar pane names its session on the socket it connects with, and a tool call resolves its browser from the session the call came from. Two conversations cannot see each other's tabs, pages, or sign-ins.
-- **Trusted input in both directions.** Clicks and typing in the sidebar are forwarded to the real page, and the agent's `browser_click` and `browser_type` dispatch real mouse and text events at the element's own position — a site that ignores a synthetic `element.click()` still accepts those.
+- **Works in both interfaces.** The Web GUI and the Desktop app run the same plugin against the same browser; install it once in each and nothing else differs, including the settings page.
+- **One browser per conversation.** Tabs, sign-ins, and ports belong to one conversation and stay there: the sidebar pane names its session, and a tool call resolves its browser from the session that called it.
+- **Watch it work, or take over.** Every page the browser opens gets its own sidebar tab with a live view, and clicks and typing in that tab reach the real page.
+- **The agent can read a page it has never seen.** `browser_snapshot` prints the page's accessibility tree with a `ref` per node, which is how the agent reads an unfamiliar page and how it names the element to click; `find` narrows a large page, and `boxes` gives positions without a screenshot.
+- **Input a site accepts.** Real mouse and text events at the element's own position — a page that ignores a synthetic `element.click()` still takes these — plus chords such as `Ctrl+A`, native dropdowns and checkboxes, dialogs answered by the call that opens them, and an explicit refusal when something else would receive the press.
+- **Nine tools, and code for the rest.** `browser_evaluate` is the general-purpose one; the others cover what code cannot express, such as reading a page without knowing its selectors first, or asking what the page said while it failed. See [Tools](#tools).
 - **Attachable.** Each browser listens on an external CDP port, so `chrome://inspect`, another Playwright, or the bundled `scripts/cdp.mjs` can attach to the same browser the sidebar is mirroring.
-- **Readable without selectors.** `browser_snapshot` prints the page's accessibility tree with a `ref` for each node, which is how the agent reads a page it has never seen and how it names an element to click; `find` narrows a large page to the paths that answer a question, and `boxes` says where each element is without a screenshot.
-- **A small tool set that leans on code.** Nine tools rather than forty: `browser_evaluate` is the general-purpose one, and the rest cover what code cannot express — reading the page without knowing it first, input that has to be trusted (real clicks with the button and click count a gesture needs, chords such as `Ctrl+A`, dialogs answered rather than silently dismissed), a wait that reports what the page was doing while it waited, and the two questions a page can only be asked over time: whether it reached a state, and what it said about itself while failing. `browser_tabs` covers the pages themselves — list, open, select, close: page script cannot see another target, and "which page the tools act on" is not a property of any page.
-- **Guidance where the model reads it.** The plugin contributes a skill describing how to drive a page — read before acting, one action per observation, and the rule that a page's text is data rather than instructions — and repeats that rule in the two tool descriptions that return page content. Five short recipes under `skills/dsh-browser/references/` are listed by question ("a locator matched several elements", "the change you expected never appeared") and read only when that question is the one being asked.
+- **Working rules where the model reads them.** The plugin contributes a skill — read before acting, one action per observation, and a page's text is data rather than instructions — with five short recipes read only when their question comes up.
 
 ## Table of Contents
 
@@ -81,7 +82,7 @@ Use `<Desktop install dir>/resources/runtime/cli/bin/dsh` on macOS and Linux. Re
 <a id="compatibility"></a>
 ## Compatibility
 
-dsh changed its settings model in 0.1.7-rc.1 with no compatibility layer. A plugin page is now derived from the Config schema's `volatile` fields instead of being registered against a namespace scope: `SettingsScope` and `SettingsForms.installSection` are gone, the client service is `ctx.configForms`, and a volatile field arrives as a `Volatile<T>` that has to be read through rather than used directly.
+A build targets one dsh generation, so install the plugin version that pairs with your dsh. The fork is in the client half — dsh 0.1.7-rc.1 replaced the settings model with no compatibility layer — which is why one build cannot serve both generations.
 
 That fork is in the client half's imports, so one build cannot target both generations and the plugin pairs by generation:
 
@@ -99,7 +100,7 @@ Three steps, and the agent needs no instruction beyond what it is asked to do:
 2. **Ask for something.** "Open the docs and tell me what the install section says" is enough: the tools act on the same browser the pane shows, so you watch the work happen.
 3. **Attach your own tools when you want them.** `curl http://127.0.0.1:9333/json/version` answers while the browser runs; `chrome://inspect`, another Playwright over `chromium.connectOverCDP`, and `scripts/cdp.mjs` all attach to it.
 
-Under the hood, the sidebar shows one tab per page the browser holds open, and the two stay matched: a link that opens a tab puts a tab in the strip, a page that closes takes its tab with it, and closing a tab closes the page it mirrored — the last one stops the browser, which stays stopped until something asks for one again. Tabs that name no page (the guide entry's) hand over to the per-page tabs as soon as pages exist, and **each pick of that entry asks the host for a page**: a browser that is already running gets one more, and one that is not comes up on the page the ask answers with — so picking the entry after a browser exists adds a tab rather than settling on the one already there. Which page the tools act on is the agent's to choose, with `browser_tabs`. Either way, the next tool call that needs a browser starts one and the sidebar follows it. A browser is not a per-request resource: it stays alive between tool calls, which is what makes a conversation feel like it has a browser rather than a sequence of page loads.
+The sidebar and the browser stay matched: one tab per page the browser has open, a new page adds a tab, closing a tab closes the page, and closing the last one stops the browser until something asks for another one. Which page the tools act on is the agent's choice (`browser_tabs`), independent of which tab you are looking at. [Understand the design](#understand-the-design) covers the rest.
 
 -----
 
