@@ -47,52 +47,65 @@ export interface BrowserSettingsInjected {
   readonly t: (key: DshBrowserKey) => string
 }
 
+/**
+ * Every value here is a `--dsw-*` token from ui-theme: the page is read in both
+ * palettes, and a name the theme does not define falls back to nothing at all
+ * rather than to a colour that happens to suit one of them. The materials are the
+ * shared settings ones, so this page sits beside the harness's own cards: a
+ * control is `bg-layer-3` inside a `border-l4` hairline at `radius-md`, a label
+ * is 13px primary, a hint is 12px tertiary, and a card is `radius-xl` over the
+ * settings-card fill and stroke.
+ */
 const styles: Readonly<Record<string, CSSProperties>> = {
   page: { display: 'flex', flexDirection: 'column', gap: '14px', maxWidth: '720px' },
-  intro: { margin: 0, fontSize: '12px', lineHeight: 1.6, opacity: 0.75 },
-  group: { display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '1px solid rgba(128,128,128,0.25)', paddingTop: '12px' },
-  row: { display: 'flex', gap: '12px', alignItems: 'flex-start', justifyContent: 'space-between' },
+  intro: { margin: 0, fontSize: '12px', lineHeight: 1.6, color: 'var(--dsw-alias-label-tertiary)' },
+  group: { display: 'flex', flexDirection: 'column', gap: '4px', borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: '6px' },
+  row: { display: 'flex', gap: '12px', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0' },
   label: { display: 'flex', flexDirection: 'column', gap: '2px', flex: '1 1 auto', minWidth: 0 },
-  name: { fontSize: '13px' },
-  hint: { fontSize: '11px', opacity: 0.6, lineHeight: 1.5 },
-  control: { display: 'flex', gap: '6px', alignItems: 'center', flex: '0 0 auto' },
+  name: { fontSize: '13px', fontWeight: 500, lineHeight: 1.5, color: 'var(--dsw-alias-label-primary)' },
+  hint: { fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' },
+  control: { display: 'flex', gap: '8px', alignItems: 'center', flex: '0 0 auto' },
   input: {
-    padding: '4px 6px', fontSize: '12px', width: '240px', borderRadius: '4px',
-    border: '1px solid var(--dsh-border, #333b44)', background: 'var(--dsh-input-background, #1b1f24)', color: 'inherit',
+    boxSizing: 'border-box', padding: '6px 12px', width: '240px', font: 'inherit', fontSize: '13px', lineHeight: 1.5,
+    border: '0.5px solid var(--dsw-alias-border-l4)', borderRadius: 'var(--dsw-radius-md)',
+    background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)',
   },
   number: {
-    padding: '4px 6px', fontSize: '12px', width: '84px', borderRadius: '4px',
-    border: '1px solid var(--dsh-border, #333b44)', background: 'var(--dsh-input-background, #1b1f24)', color: 'inherit',
+    boxSizing: 'border-box', padding: '6px 12px', width: '84px', font: 'inherit', fontSize: '13px', lineHeight: 1.5,
+    border: '0.5px solid var(--dsw-alias-border-l4)', borderRadius: 'var(--dsw-radius-md)',
+    background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)',
   },
   select: {
-    padding: '4px 6px', fontSize: '12px', borderRadius: '4px',
-    border: '1px solid var(--dsh-border, #333b44)', background: 'var(--dsh-input-background, #1b1f24)', color: 'inherit',
+    boxSizing: 'border-box', padding: '6px 12px', font: 'inherit', fontSize: '13px', lineHeight: 1.5,
+    border: '0.5px solid var(--dsw-alias-border-l4)', borderRadius: 'var(--dsw-radius-md)',
+    background: 'var(--dsw-alias-bg-layer-3)', color: 'var(--dsw-alias-label-primary)',
   },
   reset: {
-    padding: '3px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: '4px',
-    border: '1px solid var(--dsh-border, #333b44)', background: 'transparent', color: 'inherit', opacity: 0.8,
+    border: 'none', background: 'none', padding: 0, font: 'inherit',
+    fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer',
   },
-  note: { margin: 0, fontSize: '11px', opacity: 0.6 },
+  note: { margin: 0, fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' },
   status: {
     display: 'flex', gap: '10px', alignItems: 'center', justifyContent: 'space-between',
-    padding: '8px 10px', borderRadius: '6px', fontSize: '12px',
-    border: '1px solid rgba(128,128,128,0.3)', background: 'rgba(128,128,128,0.08)',
+    padding: '10px 12px', fontSize: '12px', lineHeight: 1.5, borderRadius: 'var(--dsw-radius-xl)',
+    border: '0.5px solid var(--dsw-alias-settings-card-stroke)', background: 'var(--dsw-alias-settings-card-fill)',
+    color: 'var(--dsw-alias-label-secondary)',
   },
   statusText: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 },
-  statusDetail: { fontSize: '11px', opacity: 0.65, wordBreak: 'break-all', display: 'block' },
-  statusSummary: { fontSize: '11px', opacity: 0.65, cursor: 'pointer' },
-  statusFailed: { color: 'var(--dsh-danger, #e06c75)' },
-  fold: { display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '1px solid rgba(128,128,128,0.25)', paddingTop: '12px' },
-  foldSummary: { cursor: 'pointer', fontSize: '13px', opacity: 0.9 },
+  statusDetail: { fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)', wordBreak: 'break-all', display: 'block' },
+  statusSummary: { fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer' },
+  statusFailed: { color: 'var(--dsw-alias-state-error-primary)' },
+  fold: { display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: '12px' },
+  foldSummary: { cursor: 'pointer', fontSize: '13px', fontWeight: 500, lineHeight: 1.5, color: 'var(--dsw-alias-label-primary)' },
   block: { display: 'flex', flexDirection: 'column', gap: '10px' },
   blockDivided: {
     display: 'flex', flexDirection: 'column', gap: '10px',
-    borderTop: '1px solid rgba(128,128,128,0.16)', paddingTop: '12px',
+    borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: '12px',
   },
-  blockTitle: { margin: 0, fontSize: '12px', fontWeight: 600, opacity: 0.85 },
-  blockHint: { margin: 0, fontSize: '11px', opacity: 0.6, lineHeight: 1.5 },
-  save: { margin: 0, fontSize: '11px', opacity: 0.75, minHeight: '15px' },
-  saveFailed: { margin: 0, fontSize: '11px', color: 'var(--dsh-danger, #e06c75)', minHeight: '15px' },
+  blockTitle: { margin: 0, fontSize: '13px', fontWeight: 500, lineHeight: 1.5, color: 'var(--dsw-alias-label-primary)' },
+  blockHint: { margin: 0, fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)' },
+  save: { margin: 0, fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)', minHeight: '18px' },
+  saveFailed: { margin: 0, fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-state-error-primary)', minHeight: '18px' },
 }
 
 /**
