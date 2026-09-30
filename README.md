@@ -10,6 +10,8 @@ English | [中文](README.zh.md)
 
 ## Summary
 
+It runs on both surfaces: the DeepSeek Harness Web GUI and the Desktop app. The sidebar pane, the settings section, the nine tools, and each browser's external CDP port behave the same in either; the platform difference is the install route and where the pane draws its stream from — a Desktop window is the shell's own `dsh-app://app` document, so the pane dials the Host origin that shell publishes rather than the document's own.
+
 This plugin gives every DeepSeek Harness conversation its own real local browser: Chrome or Edge runs as a separate process with its own profile and its own CDP port, the agent drives it with nine tools, and the right sidebar mirrors it so you can watch and operate the same pages. Nothing is shared between conversations — not the tabs, not the cookies, not the port.
 
 It is not an embedded web view. The page runs in an ordinary browser process, so sites see a normal browser, DevTools or another Playwright can attach to it while the mirror is live, and closing the harness does not leave a browser pretending to be part of the app.
@@ -17,6 +19,7 @@ It is not an embedded web view. The page runs in an ordinary browser process, so
 <a id="highlights"></a>
 ## Highlights
 
+- **Web and Desktop, one build.** It serves the Web GUI and the Desktop app alike: the pane mirrors the browser and the tools drive it in both. Only the install route and the pane's stream origin differ.
 - **One browser per conversation.** Isolation is enforced on both paths: the sidebar pane names its session on the socket it connects with, and a tool call resolves its browser from the session the call came from. Two conversations cannot see each other's tabs, pages, or sign-ins.
 - **Trusted input in both directions.** Clicks and typing in the sidebar are forwarded to the real page, and the agent's `browser_click` and `browser_type` dispatch real mouse and text events at the element's own position — a site that ignores a synthetic `element.click()` still accepts those.
 - **Attachable.** Each browser listens on an external CDP port, so `chrome://inspect`, another Playwright, or the bundled `scripts/cdp.mjs` can attach to the same browser the sidebar is mirroring.
@@ -62,6 +65,16 @@ dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.2
 ```
 
 The built `lib/` is committed with each tag, so a tag install needs no build step. The profile's `package.json` records the ref you chose; to change versions, re-add with the new ref, and to remove the plugin use `dsh plugin remove --profile web dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
+
+### Desktop
+
+The Desktop app owns its own profile, and the ordinary CLI refuses to manage `--profile desktop` on purpose, so install through the Desktop CLI that ships with the app:
+
+```sh
+"<Desktop install dir>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.2
+```
+
+Use `<Desktop install dir>/resources/runtime/cli/bin/dsh` on macOS and Linux. Restart the app afterwards, the same way the Web profile restarts after `dsh plugin add`; the same `remove` verb uninstalls it.
 
 -----
 

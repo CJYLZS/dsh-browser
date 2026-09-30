@@ -10,6 +10,8 @@
 
 ## 概述
 
+**Web 与 Desktop 两个界面都支持。** 侧栏面板、设置页、九个工具、每台浏览器对外的 CDP 端口在两边行为一致；平台差异只有两处：安装入口，以及面板从哪里取流——Desktop 的窗口是 shell 自己的 `dsh-app://app` 文档，所以面板连的是 shell 发布的 Host origin，而不是文档自己的 origin。
+
 这个插件给每个 DeepSeek Harness 对话一台**真实的本机浏览器**：Chrome 或 Edge 以独立进程运行，有自己的 profile、自己的 CDP 端口；agent 用九个工具驱动它，右侧栏镜像它，于是你能看着、也能直接操作同一批页面。会话之间什么都不共享——标签、cookie、端口都不共享。
 
 它不是内嵌的网页视图。页面跑在一个普通浏览器进程里，所以站点看到的是正常浏览器，镜像运行时 DevTools 或另一个 Playwright 可以附加进来，关掉 harness 也不会留下一个假装属于界面的浏览器进程。
@@ -17,6 +19,7 @@
 <a id="highlights"></a>
 ## 特点
 
+- **Web 与 Desktop 通用。** 同一份构建同时服务 Web 界面与 Desktop 应用：两边都是面板镜像、工具驱动；不同的只有安装入口与面板取流的 origin。
 - **一个对话一台浏览器。** 两条路径都做了隔离：侧栏面板在它连接的 socket 上报出自己的会话，工具调用按调用来源的会话解析自己的浏览器。两个对话看不到对方的标签、页面与登录态。
 - **两个方向都是可信输入。** 侧栏里的点击与输入会转发到真实页面；agent 的 `browser_click` 与 `browser_type` 在元素自身的位置派发真实鼠标与文本事件——忽略合成 `element.click()` 的站点同样接受这些。
 - **可附加。** 每台浏览器都监听一个对外 CDP 端口，`chrome://inspect`、另一个 Playwright、或随仓库的 `scripts/cdp.mjs` 都能附加到侧栏正在镜像的那台浏览器。
@@ -62,6 +65,16 @@ dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.2
 ```
 
 构建产物 `lib/` 随每个 tag 提交，所以按 tag 安装不需要构建。profile 的 `package.json` 会记下你选的 ref；换版本就用新 ref 重新 add，移除插件用 `dsh plugin remove --profile web dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
+
+### Desktop
+
+Desktop 应用自己拥有它的 profile，而普通 CLI 有意拒绝管理 `--profile desktop`，所以走随应用一起发布的 Desktop CLI：
+
+```sh
+"<Desktop 安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.2
+```
+
+macOS 与 Linux 用 `<Desktop 安装目录>/resources/runtime/cli/bin/dsh`。装完重启应用，和 Web profile 用 `dsh plugin add` 之后一样；卸载用同一个 `remove`。
 
 -----
 
