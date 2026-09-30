@@ -471,6 +471,52 @@ export function refTargetOf(node: AxNode): RefTarget | undefined {
 }
 
 /**
+ * Roles that describe a document rather than a control inside it.
+ *
+ * A document is marked focused whenever its frame has the focus at all, so it
+ * says nothing about where a key sent the focus; `focusedInTree` skips these.
+ */
+const DOCUMENT_ROLES = new Set(['RootWebArea', 'WebArea', 'document'])
+
+/**
+ * Where the keyboard focus is, as the accessibility tree describes it.
+ *
+ * A key that moves the focus — Tab, Shift+Tab — is a gesture whose whole effect
+ * is "something else is focused now", and the report used to answer that with
+ * "on whatever the page has focused", which is true and useless. The tree is the
+ * only place the focused element has a role and a name, and Chrome marks it
+ * there with the `focused` state, so the answer is read the same way every other
+ * element is named. Measured 2026-09-29 in a real tree (`.prove/focus-probe.mjs`):
+ * the state is `true` on the control that holds the focus **and** on the
+ * document that contains it, which stays `true` even when the focus is on the
+ * body — so the document is never the answer (see `DOCUMENT_ROLES`). The
+ * reference runtime reports the same fact on its computer-use side as
+ * `focus_changed` plus the focused title.
+ * @param nodes - the flat node list CDP returns.
+ * @returns the focused element's role and name, or `undefined` when nothing has
+ * the focus — which is a real answer: after a navigation the focused element is
+ * gone with the document that held it.
+ */
+export function focusedInTree(nodes: readonly AxNode[]): { role: string; name: string } | undefined {
+  for (const node of nodes) {
+    const focused = (node.properties ?? []).some(
+      property => property.name === 'focused' && property.value?.value === true,
+    )
+    if (!focused) continue
+    const role = roleOf(node)
+    // The document is marked focused whenever its frame has the focus at all, so
+    // it comes first in every tree and answers nothing: a real one carries the
+    // state on the RootWebArea and, only when it is true, on the control as well
+    // (measured 2026-09-29, `.prove/focus-probe.mjs`). Reading the first marked
+    // node named the page instead of the control — exactly the answer this is
+    // here to replace.
+    if (role === '' || DOCUMENT_ROLES.has(role)) continue
+    return { role, name: nameOf(node) }
+  }
+  return undefined
+}
+
+/**
  * Print an accessibility tree.
  *
  * Traversal is depth-first in the tree's own child order. Nodes the filters drop

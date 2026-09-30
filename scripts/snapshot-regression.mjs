@@ -259,6 +259,80 @@ const POPUP_FIXTURE = `<!doctype html><meta charset="utf-8"><title>popup fixture
 <button id="open" onclick="const w = window.open('about:blank', 'second'); w.document.title = 'second page'; w.document.body.textContent = 'I am the second page'; document.querySelector('#log').textContent = 'opened'">Open second page</button>
 <p id="log">nothing yet</p>`
 
+
+/**
+ * A page whose control is inside a same-origin child frame.
+ *
+ * Chrome answers the page-level accessibility tree with every `Iframe` node
+ * carrying no children, so the contents of a frame are in the pixels and absent
+ * from the tree until the frame itself is fetched and spliced under the element
+ * that owns it. This is the shape that was broken for a whole round: `Page.Frame`
+ * names itself `id`, and reading `frameId` spliced nothing on any page at all.
+ */
+const IFRAME_FIXTURE = `<!doctype html><meta charset="utf-8"><title>iframe fixture</title>
+<h1>Iframe fixture</h1>
+<button id="outside" onclick="globalThis.__outside = true">Outside</button>
+<iframe title="Frame holder" srcdoc="<button id='inner' onclick='window.parent.__inner = true'>Inner control</button>"></iframe>`
+
+/**
+ * A page whose select and checkbox cannot be driven by a press.
+ *
+ * The popup of a select belongs to the browser process and its options have no
+ * box, so a press can open it and never choose one; the checkbox writes no
+ * attribute when it is toggled, so a press on it leaves no DOM record either.
+ * Both are the shapes `select` and `checked` exist for, and the page writes down
+ * what it was told, so a check reads the words of the page and not of the report.
+ */
+const SELECT_FIXTURE = `<!doctype html><meta charset="utf-8"><title>select fixture</title>
+<h1>Select fixture</h1>
+<label for="pick">Pick</label>
+<select id="pick" aria-label="Pick">
+  <option value="one">One</option>
+  <option value="two">Two</option>
+  <option value="three">Three</option>
+</select>
+<label><input id="agree" type="checkbox"> Agree</label>
+<p id="log">nothing yet</p>
+<script>
+  const log = (what) => { document.querySelector('#log').textContent = what }
+  document.querySelector('#pick').addEventListener('change', (event) => log('picked ' + event.target.value))
+  document.querySelector('#agree').addEventListener('change', (event) => log('agree ' + event.target.checked))
+</script>`
+/**
+ * A page with controls for a bare key to move the focus between.
+ *
+ * Only a real tree says which node carries the `focused` state, and Chrome puts
+ * it on the document as well, so the shape this pins is "which of several
+ * controls did it land on" (measured 2026-09-29, `.prove/focus-probe.mjs`).
+ */
+const FOCUS_FIXTURE = `<!doctype html><meta charset="utf-8"><title>focus fixture</title>
+<h1>Focus fixture</h1>
+<input id="first" aria-label="First field">
+<input id="second" aria-label="Second field">
+<button id="last" aria-label="Last button">Last</button>`
+
+/** A page with nothing focusable: the document is all the tree marks. */
+const BARE_FIXTURE = `<!doctype html><meta charset="utf-8"><title>bare fixture</title>
+<p>Nothing to focus here.</p>`
+
+/**
+ * A page whose content lives where only the page itself can look.
+ *
+ * An open shadow root and a same-origin `srcdoc` frame both reach the
+ * accessibility tree, and both were out of reach of a selector query rooted at
+ * the document: measured 2026-09-29, `target="#inside"` was refused and a
+ * marked element inside the shadow root was printed anyway.
+ */
+const SHADOW_FIXTURE = `<!doctype html><meta charset="utf-8"><title>shadow fixture</title>
+<h1>Shadow fixture</h1>
+<div id="host"></div>
+<div data-dsh-browser-ignore><button id="ignored-light">Ignored light</button></div>
+<iframe title="Frame holder" srcdoc="<button id='inner'>Inner control</button>"></iframe>
+<script>
+  const root = document.querySelector('#host').attachShadow({ mode: 'open' })
+  root.innerHTML = '<button id="inside">Shadow button</button>'
+    + '<div data-dsh-browser-ignore><button id="ignored-shadow">Ignored shadow</button></div>'
+</script>`
 const t0 = Date.now()
 const results = []
 
@@ -996,6 +1070,103 @@ async function main() {
         after.state === 'ready' && after.tabs.length === 1,
         JSON.stringify({ state: after.state, tabs: after.tabs.map(tab => tab.url) }))
     }
+
+    log('\n[28] a control no press can reach is set, and a frame is in the tree')
+    const selectUrl = `data:text/html;charset=utf-8,${encodeURIComponent(SELECT_FIXTURE)}`
+    await step('navigate to the select fixture', 30_000, () => browser.navigate(selectUrl))
+    const selectTree = await step('select fixture snapshot', 30_000, () => browser.snapshot())
+    const pickRef = refFor(selectTree.text, /combobox "Pick"/)
+    const agreeRef = refFor(selectTree.text, /checkbox "Agree"/)
+    if (pickRef === undefined || agreeRef === undefined) {
+      check('the fixture has a select and a checkbox to name', false, selectTree.text.slice(0, 300))
+    } else {
+      // A native select cannot be chosen by pressing: its popup is the browser
+      // process and its options have no box, so a selection is set on the
+      // element and the page's own input/change events are dispatched — the
+      // shape the reference runtime has as select(ref, values).
+      const chosen = await step('choose an option by its visible label', 30_000,
+        () => browser.select(pickRef, ['Two']))
+      check('a selection reports the label it chose',
+        chosen.selected?.length === 1 && chosen.selected[0] === 'Two',
+        JSON.stringify(chosen.selected ?? null))
+      const picked = await step('read the value and log the page reports', 30_000,
+        () => browser.evaluate('({ value: document.querySelector("#pick").value, log: document.querySelector("#log").textContent })'))
+      check('the selection reached the page as the value it names',
+        picked?.value === 'two' && picked?.log === 'picked two', JSON.stringify(picked ?? null))
+
+      // The checkbox is the other half: setting it changes no attribute, so a
+      // change list can see nothing, and only the state the result carries
+      // says what happened.
+      const agreed = await step('set the checkbox state', 30_000, () => browser.check(agreeRef, true))
+      check('a check reports the state the control ended in', agreed.checked === true,
+        JSON.stringify(agreed.checked ?? null))
+      const agreedBack = await step('read the control back', 30_000,
+        () => browser.evaluate('({ checked: document.querySelector("#agree").checked, reflected: document.querySelector("#agree").hasAttribute("checked") })'))
+      check('the state landed even though no attribute records it',
+        agreedBack?.checked === true && agreedBack?.reflected === false,
+        JSON.stringify(agreedBack ?? null))
+    }
+
+    const frameUrl = `data:text/html;charset=utf-8,${encodeURIComponent(IFRAME_FIXTURE)}`
+    await step('navigate to the iframe fixture', 30_000, () => browser.navigate(frameUrl))
+    const frameTree = await step('iframe fixture snapshot', 30_000, () => browser.snapshot())
+    check('a control inside a same-origin frame is in the page tree',
+      /button "Inner control"/.test(frameTree.text), frameTree.text.slice(0, 400))
+    const innerRef = refFor(frameTree.text, /"Inner control"/)
+    if (innerRef === undefined) {
+      check('the control inside the frame has a ref to act on', false, 'no line named it')
+    } else {
+      const clicked = await step('click the control inside the frame by its ref', 30_000,
+        () => browser.click(innerRef))
+      const inside = await step('read whether the handler in the frame ran', 30_000,
+        () => browser.evaluate('globalThis.__inner === true'))
+      check('a click on a control inside a frame reaches the frame',
+        `${JSON.stringify(clicked.element ?? null)} fired=${String(inside)}`)
+    }
+
+    log('\n[29] a key with no element says where the focus went')
+    const focusUrl = `data:text/html;charset=utf-8,${encodeURIComponent(FOCUS_FIXTURE)}`
+    await step('navigate to the focus fixture', 30_000, () => browser.navigate(focusUrl))
+    const tabbed = await step('press Tab with no element named', 30_000, () => browser.press('Tab'))
+    const activeAfterTab = await step('ask the page which element is active', 30_000,
+      () => browser.evaluate('document.activeElement?.id ?? "none"'))
+    check('a bare Tab names the control the focus landed on, not the document',
+      tabbed.focused?.name === 'First field' && activeAfterTab === 'first',
+      JSON.stringify({ focused: tabbed.focused ?? null, activeElement: activeAfterTab }))
+    const tabbedAgain = await step('press Tab again', 30_000, () => browser.press('Tab'))
+    check('the next Tab names the next control',
+      tabbedAgain.focused?.name === 'Second field', JSON.stringify(tabbedAgain.focused ?? null))
+    const wentBack = await step('press Shift+Tab', 30_000, () => browser.press('Shift+Tab'))
+    check('Shift+Tab names the control it went back to',
+      wentBack.focused?.name === 'First field', JSON.stringify(wentBack.focused ?? null))
+
+    // The document carries the state whenever the page has the focus at all, so
+    // a page with nothing to focus must name no element rather than the page.
+    const bareUrl = `data:text/html;charset=utf-8,${encodeURIComponent(BARE_FIXTURE)}`
+    await step('navigate to a page with nothing focusable', 30_000, () => browser.navigate(bareUrl))
+    const nowhere = await step('press Tab on a page with no controls', 30_000, () => browser.press('Tab'))
+    check('a page whose only focus is the document names no element',
+      nowhere.focused === undefined, JSON.stringify(nowhere.focused ?? null))
+
+    log('\n[30] a selector reaches what only the page can see')
+    const shadowUrl = `data:text/html;charset=utf-8,${encodeURIComponent(SHADOW_FIXTURE)}`
+    await step('navigate to the shadow fixture', 30_000, () => browser.navigate(shadowUrl))
+    const shadowTree = await step('shadow fixture snapshot', 30_000, () => browser.snapshot())
+    const flat = (text) => text.replace(/\n/g, ' ').slice(0, 220)
+    check('an element inside an open shadow root is in the page tree',
+      /button "Shadow button"/.test(shadowTree.text), flat(shadowTree.text))
+    check('a marked element in the light DOM stays out of the tree',
+      !/Ignored light/.test(shadowTree.text), flat(shadowTree.text))
+    check('a marked element inside a shadow root stays out too',
+      !/Ignored shadow/.test(shadowTree.text), flat(shadowTree.text))
+    const inShadow = await step('narrow to a selector inside the shadow root', 30_000,
+      () => browser.snapshot({ target: '#inside' }))
+    check('a target selector reaches into an open shadow root',
+      /Shadow button/.test(inShadow.text), flat(inShadow.text))
+    const inFrame = await step('narrow to a selector inside the frame', 30_000,
+      () => browser.snapshot({ target: '#inner' }))
+    check('a target selector reaches into a same-origin frame',
+      /Inner control/.test(inFrame.text), flat(inFrame.text))
 
   } finally {
     await browser.close().catch(() => {})

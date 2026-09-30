@@ -87,7 +87,7 @@ Status: implemented
 - `selector` 也不行：`iframe[name=iframe1] button` → `no element matches selector …`，因为 `DOM.querySelector` 只在主文档里找。而这条错误接着建议"call browser_snapshot and act on a ref from its result"——在帧这一情形里是**死路**，那个 ref 永远不会出现。
 - 唯一的路是 `browser_evaluate` 走同源 `contentDocument`，那是不可信事件，正是 `browser_click` 存在的理由。
 
-修法是功能级的：按 `Page.getFrameTree` 给每个子帧各取一次树（同进程帧用 `frameId`，OOPIF 要附加 `Target`），把子树接到 `Iframe` 节点下面，ref 也要发给帧内节点，`selector` 同样要能下到帧里。不在本轮修复范围。
+修法是功能级的：按 `Page.getFrameTree` 给每个子帧各取一次树（同进程帧用 `frameId`，OOPIF 要附加 `Target`），把子树接到 `Iframe` 节点下面，ref 也要发给帧内节点，`selector` 同样要能下到帧里。不在本轮修复范围——**下一轮照此落地了拼接，但那条路径一次都没跑通**：`Page.Frame` 的标识符字段叫 `id`，代码读的是不存在的 `frameId`，于是这一条在整个下一轮里名不副实。字段名、假件与回归 fixture 见[子帧那一篇](../bug-fix/2026-09-29-frame-splice-never-ran.md)。
 
 ### 新发现：替换文档的点击把状态读在导航提交之前
 
@@ -208,7 +208,7 @@ if (typeof value !== 'string' || value === '') return undefined
 - **`inline` 这条链路的闭环依赖一次插件重载**：DSH 在加载插件时读入 `lib/index.js`，`pnpm run build` 只更新磁盘上的产物，所以界面上仍跑旧模块时同一个调用会继续报校验错误——那不是修复没生效，是模块没被换掉。2026-09-29 重载后复验通过（见上一节）。下次改 host 半边时按同一顺序：改源码 → 跑测试 → `pnpm run build` → 重载/重启 → 用工具面复验一次。
 - 两条欠账在同一次复验里销掉：`/login` 的 `Username` / `Password` 无障碍名确实来自关联 `<label for>`（页面里既没有 `placeholder` 也没有 `aria-label`，浏览器自己的 `input.labels` 也答同一个词）；`/login` 上 `text: "Login"` 同时命中 `heading "Login Page"` 与 `button " Login"` 而被拒，补上 `role: "button"` 就命中按钮——`role`+`name` 的消歧在真实页面上成立。
 - 这一轮之前的三条结论都被复验为真，但**三遍真机过下来又找出九条新的**，按优先级是：子帧内容不在快照里且 ref / `selector` 都到不了（`Iframe` 节点在原始树里 `childIds: []`，是 Chrome 的整页树不含子帧，属功能级改动）＞`window.open` 开出的新页赶不上这次回报（三次里漏两次，而那一行正是为防止"调用方继续描述它已经离开的页面"存在的）＞替换文档的点击会报出一个页面从未有过的标题（`page.title()` 在答不上来时自编 `Loading <url>`）＞点击不看元素能否使用（与输入的拒绝不对称）＞等待没有"可用"这个条件＞布尔属性的方向读不出来（`disabled` 加了和删了印成同一行，根因是我们自己的 `readChange` 丢掉空串）＞`selector` 进不到 shadow root（三处 `DOM.getDocument` 都没带 `pierce`）＞`find` 只搜 role 与名字、却声称搜的是打印出来的文字＞"没有匹配的 selector"这条错误在有子帧时给的建议是死路（它叫调用方去取一个不会出现的 ref，这一条随前几条一起修）。前三条其实是同一句话的三个面：**回报是在页面把话说完之前读的**。一次真机过一遍的价值不在"确认已修的"，而在这种只会在真实导航时序、真实帧结构与真实影子根里出现的缺陷。
-- 这九条（外加多标签"设置页看得到两个页面、侧栏只有一个标签"的第十条）已在同一天分批修复：前九条按缺陷类别落在各自的笔记里（定位/输入/截图/变更清单/等待，见 Related 与各自的链接），第十条的 1:1 标签见[那一篇](../feature/2026-09-29-one-tab-per-page.md)；回归脚本补了 [27]（同址两页仍是两个 CDP target、按 target 关页、按页镜像出帧）。
+- 这九条（外加多标签"设置页看得到两个页面、侧栏只有一个标签"的第十条）已在同一天分批修复：前九条按缺陷类别落在各自的笔记里（定位/输入/截图/变更清单/等待，见 Related 与各自的链接），第十条的 1:1 标签见[那一篇](../feature/2026-09-29-one-tab-per-page.md)。**只有子帧那一条要打折扣**：那一次确实按帧树写了拼接，但字段名读错，拼接从未跑过一次，所以它在当时是"写了"而不是"修好了"——下一轮真机过一遍发现并订正，见[子帧那一篇](../bug-fix/2026-09-29-frame-splice-never-ran.md)。回归脚本补了 [27]（同址两页仍是两个 CDP target、按 target 关页、按页镜像出帧）。
 
 ## Related
 

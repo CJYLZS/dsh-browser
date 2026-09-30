@@ -430,6 +430,13 @@ test('the arguments a tool needs are named in the SDK, not erased', async () => 
   // The output side carries the fields a program branches on.
   assert.match(jsonSchemaToTs(click.output.schema, 1), /changed: string\[\]/)
   assert.match(jsonSchemaToTs(click.output.schema, 1), /settled: boolean/)
+  // Acting on a control rather than pressing it is a parameter on the same
+  // tool: the reference runtime's select(ref, values) and check(ref, checked),
+  // and both answers are values a program can branch on.
+  assert.match(jsonSchemaToTs(click.parameters, 1), /select\?: string\[\]/)
+  assert.match(jsonSchemaToTs(click.parameters, 1), /checked\?: boolean/)
+  assert.match(jsonSchemaToTs(click.output.schema, 1), /selected\?: string\[\]/)
+  assert.match(jsonSchemaToTs(click.output.schema, 1), /checked\?: boolean/)
   // A change is an object a program reads fields off, not prose it has to parse,
   // and its kind keeps its literals so a program can switch on what happened.
   assert.match(
@@ -527,6 +534,10 @@ test('one program can drive every tool, and each answers with a value', async ()
   assert.match(path, /\.jpg$/)
   assert.ok(existsSync(path), `the screenshot was not written to ${path}`)
   assert.equal(statSync(path).size, answers.browser_screenshot?.['bytes'])
+  // The bytes are the instance's, the directory is shared: delete the file this
+  // run wrote, never the directory (another dsh may be writing screenshots into
+  // it right now).
+  rmSync(path, { force: true })
 
   // The binding boundary promises lossless JSON, so the value has to survive it.
   assert.deepEqual(JSON.parse(JSON.stringify(answers)), answers)
@@ -825,6 +836,21 @@ test('browser_type can find its field by text without guessing the role', async 
   assert.equal(answer['value'], 'a@b.c')
   // The characters went into the field the text match found, not somewhere else.
   assert.deepEqual(h.runtime.called, ['browser_type'])
+})
+
+test('a program can select an option and read back which one was chosen', async () => {
+  const h = await ptcHarness()
+  // The page's answer to a selection, in the shape the result declares.
+  h.page.cdp.answers.set('Runtime.callFunctionOn', {
+    result: { value: { kind: 'selected', selected: ['Two'] } },
+  })
+  const result = await h.run([
+    'const answer = await tools.browser_click({ text: "Send", select: ["Two"] })',
+    'return { selected: answer.selected, element: answer.element }',
+  ].join('\n'))
+  assert.equal(result.failed, false, `the program failed: ${result.message}`)
+  assert.deepEqual(result.value, { selected: ['Two'], element: { role: 'button', name: 'Send' } })
+  assert.deepEqual(h.runtime.called, ['browser_click'])
 })
 
 test('a browser_type call that types text at a ref is told where the characters go', async () => {

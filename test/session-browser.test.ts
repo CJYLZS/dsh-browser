@@ -257,7 +257,7 @@ test('typing focuses the element, replaces its content, and inserts the text', a
   assert.deepEqual(page.cdp.method('DOM.focus')[0]?.params, { backendNodeId: 21 })
   assert.deepEqual(page.cdp.method('Input.insertText')[0]?.params, { text: 'a@b.c' })
   const evaluations = page.cdp.method('Runtime.evaluate').map(call => String(call.params.expression))
-  assert.ok(evaluations.some(expression => expression.includes('select')), 'the old value was not replaced')
+  assert.ok(evaluations.some(expression => expression.includes('.select?.()')), 'the old value was not replaced')
 })
 
 test('typing without clearing appends at the caret', async () => {
@@ -265,7 +265,9 @@ test('typing without clearing appends at the caret', async () => {
   await browser.snapshot()
   await browser.type('e1', 'more', { clear: false })
   const evaluations = page.cdp.method('Runtime.evaluate').map(call => String(call.params.expression))
-  assert.equal(evaluations.some(expression => expression.includes('select')), false)
+  // The old value is replaced by selecting it first; a page-side selector walk
+  // also says "selector", so the question is asked of the call that does it.
+  assert.equal(evaluations.some(expression => expression.includes('.select?.()')), false)
   assert.deepEqual(page.cdp.method('Input.insertText')[0]?.params, { text: 'more' })
 })
 
@@ -725,20 +727,29 @@ test('a snapshot can be narrowed to the subtree of a ref it already handed out',
   assert.deepEqual(page.cdp.method('DOM.querySelector'), [], 'a ref was looked up as a selector')
 })
 
-test('a snapshot target that is not a ref is looked up as a selector', async () => {
+test('a snapshot target that is not a ref is looked up through the page', async () => {
   const { browser, page } = await started()
-  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 7 } })
-  page.cdp.answers.set('DOM.querySelector', { nodeId: 8 })
-  page.cdp.answers.set('DOM.describeNode', { node: { backendNodeId: 31 } })
+  answerSelectors(page, { '#send': [31] })
   const snapshot = await browser.snapshot({ target: '#send' })
   assert.equal(snapshot.text, '- button "Send" [ref=e1]')
-  assert.deepEqual(page.cdp.method('DOM.querySelector')[0]?.params, { nodeId: 7, selector: '#send' })
+  // The walk is the page's own, so an open shadow root and a same-origin frame
+  // are in scope; a query rooted at the document answers neither.
+  assert.deepEqual(page.cdp.method('DOM.querySelector'), [], 'the DOM agent was asked instead of the page')
+  assert.ok(
+    page.cdp.method('Runtime.evaluate').some(call => String(call.params['expression']).includes('shadowRoot')),
+    'the selector was not walked through the page',
+  )
+})
+
+test('a target selector the page cannot parse is refused as a selector', async () => {
+  const { browser, page } = await started()
+  answerSelectors(page, {}, new Set(['a[[']))
+  await assert.rejects(() => browser.snapshot({ target: 'a[[' }), /the page refused the selector/)
 })
 
 test('a selector that matches nothing fails saying which selector it was', async () => {
   const { browser, page } = await started()
-  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 7 } })
-  page.cdp.answers.set('DOM.querySelector', { nodeId: 0 })
+  answerSelectors(page, {})
   await assert.rejects(() => browser.snapshot({ target: '#nope' }), /no element matches #nope/)
 })
 
@@ -757,15 +768,13 @@ test('a depth limit reads only the levels asked for and counts the rest', async 
 
 test('the configured ignore selectors keep whole elements out of a snapshot', async () => {
   const { browser, page } = await started({ snapshotIgnore: '[data-dsh-browser-ignore], .ads' })
-  page.cdp.answers.set('DOM.getDocument', { root: { nodeId: 7 } })
-  page.cdp.answers.set('DOM.querySelectorAll', (params: Record<string, unknown>) => (
-    params['selector'] === '.ads' ? { nodeIds: [9] } : { nodeIds: [] }
-  ))
-  page.cdp.answers.set('DOM.describeNode', { node: { backendNodeId: 31 } })
+  answerSelectors(page, { '.ads': [31] })
   const snapshot = await browser.snapshot()
   assert.ok(!snapshot.text.includes('button'), 'an ignored element was printed')
-  assert.equal(page.cdp.method('DOM.querySelectorAll').length, 2)
-  assert.deepEqual(page.cdp.method('DOM.describeNode')[0]?.params, { nodeId: 9, depth: -1, pierce: false })
+  // The page's own walk finds the element, and `pierce` is what makes the drop
+  // cover what is inside it — its open shadow root and the frames within it.
+  assert.deepEqual(page.cdp.method('DOM.querySelectorAll'), [], 'the DOM agent was asked instead of the page')
+  assert.deepEqual(page.cdp.method('DOM.describeNode')[0]?.params, { objectId: 'handle-0', depth: -1, pierce: true })
 })
 
 test('refs keep their labels when a new snapshot shows a changed page', async () => {
@@ -1311,8 +1320,12 @@ test('a frame\u2019s content is in the snapshot and acts like any other element'
   // children (measured 2026-09-29 on a same-origin pair); the frame's own tree
   // is a separate answer, and the splice is what puts its control in front of
   // the caller.
+  // The fake is the real shape: a `Page.Frame` names itself `id`, and Chrome
+  // has no `frameId` (measured 2026-09-29). Written the other way this fixture
+  // — and the source it was copied from — agreed with each other and disagreed
+  // with the browser, which is how the splice stayed broken with the suite green.
   page.cdp.answers.set('Page.getFrameTree', {
-    frameTree: { frame: { frameId: 'root' }, childFrames: [{ frame: { frameId: 'f1' } }] },
+    frameTree: { frame: { id: 'root' }, childFrames: [{ frame: { id: 'f1' } }] },
   })
   page.cdp.answers.set('Accessibility.getFullAXTree', (params: Record<string, unknown>) => (
     params['frameId'] === 'f1' ? FRAME_TREE : AX_TREE_WITH_FRAME
@@ -1990,4 +2003,165 @@ test('an element with no box is refused rather than captured as a blank rectangl
   page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { ok: false } } })
   await assert.rejects(() => browser.screenshot({ target: 'e2' }), /has no visible box/)
   assert.deepEqual(page.cdp.method('Page.captureScreenshot'), [])
+})
+
+test('a select chooses options by value or label, and reports which it chose', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { kind: 'selected', selected: ['Two'] } } })
+  const report = await browser.select('e2', ['Two'])
+  assert.deepEqual(report.selected, ['Two'])
+  assert.deepEqual(report.element, { role: 'button', name: 'Send' })
+  // The reason this exists at all: a native select's options have no box, so a
+  // press is the one thing that cannot choose one.
+  assert.deepEqual(pointerCalls(page), [], 'a selection was dispatched as a press')
+  const probe = String(page.cdp.method('Runtime.callFunctionOn')[0]?.params['functionDeclaration'])
+  assert.match(probe, /option\.selected = true/)
+  assert.match(probe, /dispatchEvent\(new Event\('change'/)
+})
+
+test('a select that matches no option names the options the control has', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.answers.set('Runtime.callFunctionOn', {
+    result: { value: { kind: 'missing', missed: ['Three'], choices: ['One', 'Two'] } },
+  })
+  await assert.rejects(
+    () => browser.select('e2', ['Three']),
+    /"Three" is not an option of button "Send"[\s\S]*"One", "Two"/,
+  )
+  assert.deepEqual(pointerCalls(page), [])
+})
+
+test('a select on something that is not a select says so instead of pressing it', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { kind: 'not-select' } } })
+  await assert.rejects(() => browser.select('e2', ['Two']), /is not a <select>/)
+  assert.deepEqual(pointerCalls(page), [])
+})
+
+test('a select the page says is disabled refuses without choosing anything', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.answers.set('Runtime.callFunctionOn', { result: { value: { kind: 'disabled' } } })
+  await assert.rejects(() => browser.select('e2', ['Two']), /is disabled, so the page would ignore a selection/)
+})
+
+test('a check sets the state and reports the state the control ended in', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.answers.set('Runtime.callFunctionOn', {
+    result: { value: { kind: 'set', checked: true, tag: 'input', type: 'checkbox' } },
+  })
+  const report = await browser.check('e2', true)
+  assert.equal(report.checked, true)
+  assert.deepEqual(pointerCalls(page), [], 'a state was set by pressing')
+  const probe = String(page.cdp.method('Runtime.callFunctionOn')[0]?.params['functionDeclaration'])
+  assert.match(probe, /kind: 'not-checkable'/)
+})
+
+test('a check on a control that is not a checkbox says what it is instead', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  page.cdp.answers.set('Runtime.callFunctionOn', {
+    result: { value: { kind: 'not-checkable', tag: 'button', type: '' } },
+  })
+  await assert.rejects(() => browser.check('e2', true), /is a button, not a checkbox or radio/)
+  assert.deepEqual(pointerCalls(page), [])
+})
+
+test('a key pressed with no element says where the focus went', async () => {
+  const { browser, page } = await started()
+  // The tree marks the focused element, the way Chrome does; the report reads
+  // it there so the focus is named the way a snapshot names an element.
+  page.cdp.answers.set('Accessibility.getFullAXTree', {
+    nodes: [
+      {
+        nodeId: '1',
+        role: { value: 'RootWebArea' },
+        name: { value: 'Form' },
+        childIds: ['2', '3'],
+        // Real shape, measured 2026-09-29: the document carries the state too,
+        // and it comes first in the list, so a reader that takes the first
+        // marked node answers with the page.
+        properties: [{ name: 'focused', value: { value: true } }],
+      },
+      { nodeId: '2', role: { value: 'textbox' }, name: { value: 'Email' }, backendDOMNodeId: 21 },
+      {
+        nodeId: '3',
+        role: { value: 'link' },
+        name: { value: 'GitHub' },
+        backendDOMNodeId: 31,
+        properties: [{ name: 'focused', value: { value: true } }],
+      },
+    ],
+  })
+  const report = await browser.press('Tab')
+  assert.deepEqual(report.focused, { role: 'link', name: 'GitHub' })
+  assert.equal(report.element, undefined, 'a key with no element claimed to have acted on one')
+})
+
+test('a key pressed while only the document has the focus names no element', async () => {
+  const { browser, page } = await started()
+  // Measured 2026-09-29 in a real tree (`.prove/focus-probe.mjs`): with the focus
+  // on the body the RootWebArea still carries `focused` and nothing else does.
+  // "The page" is not where a key went, so no element is reported at all.
+  page.cdp.answers.set('Accessibility.getFullAXTree', {
+    nodes: [
+      {
+        nodeId: '1',
+        role: { value: 'RootWebArea' },
+        name: { value: 'Form' },
+        childIds: ['2'],
+        properties: [{ name: 'focused', value: { value: true } }],
+      },
+      { nodeId: '2', role: { value: 'textbox' }, name: { value: 'Email' }, backendDOMNodeId: 21 },
+    ],
+  })
+  const report = await browser.press('Tab')
+  assert.equal(report.focused, undefined, 'the document was reported as the focused element')
+})
+
+test('a dialog that was already open is not reported as this call\u2019s own', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // The pane's own user opened it, and the default policy answered it before
+  // any tool call ran; reporting it as the call's would claim an action that
+  // never happened.
+  page.dialog('confirm', 'Discard changes?')
+  await browser.snapshot()
+  const reported = browser.takeDialogs()
+  assert.equal(reported[0]?.message, 'Discard changes?')
+  assert.equal(reported[0]?.earlier, true, 'a dialog from before the call was claimed by it')
+})
+
+test('an ambiguous locator hands back a ref for every candidate it lists', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Accessibility.getFullAXTree', AMBIGUOUS_TREE)
+  answerSelectors(page, { button: [61, 62] })
+  await assert.rejects(() => browser.click({ selector: 'button' }), (error: Error) => {
+    // Two candidates with the same role and the same name: the ref is the only
+    // handle an action can be aimed at, so the refusal has to carry it.
+    const refs = [...error.message.matchAll(/\[ref=(e\d+)\]/g)].map(match => match[1])
+    assert.equal(refs.length, 2, error.message)
+    assert.notEqual(refs[0], refs[1], 'the two candidates were given the same ref')
+    return true
+  })
+})
+
+test('candidates with no name are not told to narrow by a name they do not have', async () => {
+  const { browser, page } = await started()
+  page.cdp.answers.set('Accessibility.getFullAXTree', {
+    nodes: [
+      { nodeId: '1', role: { value: 'RootWebArea' }, name: { value: 'Shadow DOM' }, childIds: ['2', '3'] },
+      { nodeId: '2', role: { value: 'button' }, name: { value: '' }, backendDOMNodeId: 61 },
+      { nodeId: '3', role: { value: 'button' }, name: { value: '' }, backendDOMNodeId: 62 },
+    ],
+  })
+  await assert.rejects(() => browser.click({ role: 'button' }), (error: Error) => {
+    assert.match(error.message, /None of them has an accessible name/)
+    assert.doesNotMatch(error.message, /Narrow it with a name that is unique/)
+    return true
+  })
 })

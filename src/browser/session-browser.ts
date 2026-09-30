@@ -21,6 +21,7 @@ import type { BrowserConfig } from '../config.ts'
 import { listOf } from '../config.ts'
 import type { BrowserSession, LaunchConfig } from './launch.ts'
 import {
+  focusedInTree,
   formatAxTree,
   parseQuery,
   RefLabels,
@@ -282,6 +283,17 @@ export interface DialogReport {
   readonly handled: 'accepted' | 'dismissed'
   /** The text a prompt was answered with, once it has been. */
   readonly answer?: string
+  /**
+   * Whether the dialog was already open when the call reporting it began.
+   *
+   * A dialog the pane's own user opened is answered by the default policy the
+   * moment it appears, so it sits in the buffer before any tool call has run,
+   * and the next call would otherwise report it as the dialog *it* met
+   * (measured 2026-09-29: a dialog the user opened in the sidebar turned up in
+   * the result of an unrelated `browser_evaluate`). Absent means the call met
+   * it while it was running.
+   */
+  readonly earlier?: boolean
 }
 
 /**
@@ -468,6 +480,16 @@ export interface ActionReport {
   /** Whether an element that had been replaced was found again by role and name. */
   readonly recovered?: boolean
   /**
+   * Where the focus is after a call that could move it, when the call named no
+   * element to say it with.
+   *
+   * A bare key press is the shape this exists for: `Shift+Tab` walks the focus
+   * somewhere the caller cannot see, and "on whatever the page has focused" told
+   * it nothing about where the next `Enter` would land. Read from the tree, so
+   * it is named the way a snapshot names an element.
+   */
+  readonly focused?: ElementRef
+  /**
    * What was over the point a click used, when it was not the element itself.
    *
    * A click goes to coordinates, so an open menu's backdrop or a sticky header
@@ -477,6 +499,17 @@ export interface ActionReport {
   readonly obstructed?: ElementRef
   /** Dialogs the pages opened during this call, and what was answered. */
   readonly dialogs?: readonly DialogReport[]
+  /**
+   * The visible labels of the options a selection chose.
+   *
+   * A native `<select>` is set rather than pressed (see `select`), so this is
+   * the page's answer to which of the requested values its options held — the
+   * fact a caller needs to know whether the words it asked for were the words
+   * the page uses.
+   */
+  readonly selected?: readonly string[]
+  /** The state a checkbox or radio holds once a `check` call is done. */
+  readonly checked?: boolean
 }
 
 /** A snapshot plus where in the page it was taken. */
@@ -1121,9 +1154,16 @@ function selectorProbe(selector: string, slot: string): string {
 /** How many child frames one snapshot splices in, counting nested ones. */
 const FRAME_TREES_MAX = 12
 
-/** The frame tree as `Page.getFrameTree` answers it: a frame and its children. */
+/**
+ * The frame tree as `Page.getFrameTree` answers it: a frame and its children.
+ *
+ * The identifier is `id`. It is not `frameId`: measured 2026-09-29 against a
+ * live Chrome, the keys of a `Page.Frame` are `["id","loaderId","url",…]` and
+ * `frame.frameId` is `undefined`, so reading the wrong name silently returned
+ * no frames at all and every page's iframe content stayed out of the snapshot.
+ */
 interface FrameTreePayload {
-  readonly frame?: { readonly frameId?: string }
+  readonly frame?: { readonly id?: string }
   readonly childFrames?: readonly FrameTreePayload[]
 }
 
@@ -1141,7 +1181,7 @@ function childFrameIds(tree: FrameTreePayload | undefined): string[] {
   const walk = (node: FrameTreePayload | undefined): void => {
     if (node === undefined) return
     for (const child of node.childFrames ?? []) {
-      const id = child.frame?.frameId
+      const id = child.frame?.id
       if (id !== undefined) ids.push(id)
       walk(child)
     }
@@ -1359,6 +1399,179 @@ function untypableError(target: { readonly role: string; readonly name: string }
     `dsh-browser: ${elementName(target)} would not take the text because ${why}; nothing was typed, `
     + 'so take a new snapshot and check the element',
   )
+}
+
+/** What a page answered about choosing options on a `<select>`. */
+interface SelectAnswer {
+  /** What the page did about it. */
+  readonly kind: 'selected' | 'not-select' | 'disabled' | 'missing' | 'unreadable'
+  /** The visible labels of the options that were chosen. */
+  readonly selected?: readonly string[]
+  /** The requested values that match no option. */
+  readonly missed?: readonly string[]
+  /** The option labels the control offers, for a refusal that can name one. */
+  readonly choices?: readonly string[]
+}
+
+/**
+ * The in-page question "take these options on the select this element belongs to".
+ *
+ * A native `<select>`'s popup is browser-process UI: a press opens it, but the
+ * options have no box in the page, so a click on one has nowhere to land —
+ * measured 2026-09-29, where a click reported `Clicked combobox` and the option
+ * was refused for having no visible box, with advice that could never succeed.
+ * Setting the selection and dispatching the page's own `input`/`change` events is
+ * what the reference runtime's `select(ref, values)` does; each value matches an
+ * option by its `value` or by its visible label.
+ * @param values - the option values or visible labels to choose.
+ * @returns the function to call on the element the caller named.
+ */
+function selectProbe(values: readonly string[]): string {
+  return `function () {
+    const named = this.nodeType === 1 ? this : this.parentElement
+    if (named === null) return { kind: 'not-select' }
+    const tag = String(named.tagName === undefined ? '' : named.tagName).toLowerCase()
+    // Naming an <option> means the selection its <select> would take, which is
+    // the shape a caller reaches for after a click on the option was refused.
+    const control = tag === 'option' && typeof named.closest === 'function'
+      ? named.closest('select')
+      : named
+    if (control === null || String(control.tagName === undefined ? '' : control.tagName).toLowerCase() !== 'select') {
+      return { kind: 'not-select' }
+    }
+    ${REFUSES_A_PRESS_JS}
+    if (refuses(control)) return { kind: 'disabled' }
+    const wanted = ${JSON.stringify(values)}
+    const options = Array.prototype.slice.call(control.options === undefined ? [] : control.options)
+    const labelOf = (option) => {
+      const label = option.label === undefined || option.label === null ? '' : String(option.label)
+      const text = label !== '' ? label : String(option.textContent === undefined || option.textContent === null ? '' : option.textContent)
+      const fallback = String(option.value === undefined || option.value === null ? '' : option.value)
+      return (text === '' ? fallback : text).replace(/\s+/g, ' ').trim()
+    }
+    const chosen = []
+    const missed = []
+    const choices = []
+    for (const option of options) choices.push(labelOf(option))
+    for (const want of wanted) {
+      const text = String(want)
+      let found = null
+      for (const option of options) {
+        if (String(option.value === undefined ? '' : option.value) === text || labelOf(option) === text) { found = option; break }
+      }
+      if (found === null) missed.push(text)
+      else chosen.push(found)
+    }
+    if (missed.length > 0) return { kind: 'missing', missed, choices: choices.slice(0, 40) }
+    if (control.multiple !== true) for (const option of options) option.selected = false
+    for (const option of chosen) option.selected = true
+    control.dispatchEvent(new Event('input', { bubbles: true }))
+    control.dispatchEvent(new Event('change', { bubbles: true }))
+    return { kind: 'selected', selected: chosen.map(labelOf) }
+  }`
+}
+
+/** One list of strings a page answered with, or `undefined` when it is not one. */
+function readStrings(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') return undefined
+    out.push(entry.slice(0, 80))
+  }
+  return out
+}
+
+/**
+ * Read what a page answered about a selection.
+ * @param value - the value `Runtime.callFunctionOn` returned.
+ * @returns the answer; `unreadable` is the page saying something this cannot use.
+ */
+function readSelect(value: unknown): SelectAnswer {
+  if (typeof value !== 'object' || value === null) return { kind: 'unreadable' }
+  const said = value as Record<string, unknown>
+  const kind = said['kind']
+  if (kind === 'not-select' || kind === 'disabled') return { kind }
+  if (kind === 'selected') {
+    const selected = readStrings(said['selected'])
+    return selected === undefined ? { kind: 'unreadable' } : { kind: 'selected', selected }
+  }
+  if (kind === 'missing') {
+    return {
+      kind: 'missing',
+      missed: readStrings(said['missed']) ?? [],
+      choices: readStrings(said['choices']) ?? [],
+    }
+  }
+  return { kind: 'unreadable' }
+}
+
+/** What a page answered about setting a checkbox or radio's state. */
+interface CheckAnswer {
+  /** What the page did about it. */
+  readonly kind: 'set' | 'not-checkable' | 'disabled' | 'unreadable'
+  /** The state the control is in once the call is done. */
+  readonly checked?: boolean
+  /** The element's tag, for a refusal that says what it is instead. */
+  readonly tag?: string
+  /** The element's type, for the same. */
+  readonly type?: string
+}
+
+/**
+ * The in-page question "set this checkbox or radio to that state".
+ *
+ * A press is the wrong tool for a control whose meaning is a state: a checkbox
+ * that does not reflect its `checked` into an attribute changes no DOM, so a
+ * click on it reports "the page did not change" and the caller cannot tell a
+ * switch it flipped from one the page ignored. Setting the state and dispatching
+ * the page's own events is what the reference runtime's `check(ref, checked)`
+ * does; the answer is the state the control ended in.
+ * @param wanted - the state to set.
+ * @returns the function to call on the element the caller named.
+ */
+function checkProbe(wanted: boolean): string {
+  return `function () {
+    const element = this.nodeType === 1 ? this : this.parentElement
+    if (element === null) return { kind: 'not-checkable' }
+    const tag = String(element.tagName === undefined ? '' : element.tagName).toLowerCase()
+    const type = String(element.type === undefined ? '' : element.type).toLowerCase()
+    if (tag !== 'input' || (type !== 'checkbox' && type !== 'radio')) {
+      return { kind: 'not-checkable', tag, type }
+    }
+    ${REFUSES_A_PRESS_JS}
+    if (refuses(element)) return { kind: 'disabled', tag, type }
+    const wanted = ${wanted ? 'true' : 'false'}
+    if (element.checked !== wanted) {
+      element.checked = wanted
+      element.dispatchEvent(new Event('input', { bubbles: true }))
+      element.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    return { kind: 'set', checked: element.checked === true, tag, type }
+  }`
+}
+
+/**
+ * Read what a page answered about setting a checked state.
+ * @param value - the value `Runtime.callFunctionOn` returned.
+ * @returns the answer; `unreadable` is the page saying something this cannot use.
+ */
+function readCheck(value: unknown): CheckAnswer {
+  if (typeof value !== 'object' || value === null) return { kind: 'unreadable' }
+  const said = value as Record<string, unknown>
+  const kind = said['kind']
+  const tag = typeof said['tag'] === 'string' ? said['tag'].slice(0, 40) : undefined
+  const type = typeof said['type'] === 'string' ? said['type'].slice(0, 40) : undefined
+  if (kind === 'not-checkable') {
+    return { kind, ...tag === undefined ? {} : { tag }, ...type === undefined ? {} : { type } }
+  }
+  if (kind === 'disabled') {
+    return { kind, ...tag === undefined ? {} : { tag }, ...type === undefined ? {} : { type } }
+  }
+  if (kind === 'set' && typeof said['checked'] === 'boolean') {
+    return { kind, checked: said['checked'], ...tag === undefined ? {} : { tag }, ...type === undefined ? {} : { type } }
+  }
+  return { kind: 'unreadable' }
 }
 
 /**
@@ -1639,6 +1852,8 @@ export class SessionBrowser {
    * learns that one appeared.
    */
   private dialogs: DialogReport[] = []
+  /** Dialogs that were already answered when the call in flight began. */
+  private dialogsEarlier: DialogReport[] = []
   /**
    * What the current document has said about itself, oldest first.
    *
@@ -2026,11 +2241,32 @@ export class SessionBrowser {
   }
 
   /**
+   * Mark where one tool call begins, for the dialogs that may already be open.
+   *
+   * A dialog is answered the instant it appears, so one the pane's own user
+   * opened is in the buffer before any tool call has run; without this the next
+   * call reports it as the dialog *it* met. Moving the buffer aside at the
+   * call's start is what lets the result say "this one was already open".
+   *
+   * Called by every path that later drains the buffer — the acting calls
+   * through `underPolicy`, and the reading calls that report dialogs of their
+   * own. A call that never drains leaves the buffer alone, which is harmless:
+   * the next call that drains marks it then.
+   */
+  private beginCall(): void {
+    if (this.dialogs.length === 0) return
+    this.dialogsEarlier.push(...this.dialogs.map(dialog => ({ ...dialog, earlier: true })))
+    this.dialogs = []
+  }
+
+  /**
    * The dialogs the pages have answered since this was last called.
-   * @returns what each page asked and how it was answered, in the order they came.
+   * @returns what each page asked and how it was answered, earliest first, with
+   * the ones that were already open when the call began marked as such.
    */
   takeDialogs(): readonly DialogReport[] {
-    const taken = this.dialogs
+    const taken = [...this.dialogsEarlier, ...this.dialogs]
+    this.dialogsEarlier = []
     this.dialogs = []
     return taken
   }
@@ -2131,6 +2367,8 @@ export class SessionBrowser {
    * @returns what the call produced.
    */
   private async underPolicy<T>(policy: DialogPolicy | undefined, work: () => Promise<T>): Promise<T> {
+    // The dialogs already in the buffer are not this call's to claim.
+    this.beginCall()
     this.policies.push(policy ?? { action: 'dismiss' })
     try {
       return await work()
@@ -2200,6 +2438,9 @@ export class SessionBrowser {
    * @throws {Error} when a target names no element or several, or has no box.
    */
   async screenshot(options: { fullPage?: boolean; target?: ElementTarget } = {}): Promise<Screenshot> {
+    // This call reports dialogs of its own (the tool drains them), so where it
+    // begins is where the ones already in the buffer stop being its.
+    this.beginCall()
     await this.ensure()
     const cdp = this.cdpSession()
     if (options.target !== undefined) {
@@ -2439,6 +2680,9 @@ export class SessionBrowser {
     find?: string
     boxes?: boolean
   } = {}): Promise<PageSnapshot> {
+    // The tool that calls this reports the dialogs the page answered, so this
+    // is where the ones already open stop being this call's.
+    this.beginCall()
     await this.ensure()
     const cdp = this.cdpSession()
     const ignore = await this.ignoredNodes(cdp)
@@ -2510,15 +2754,13 @@ export class SessionBrowser {
     const ignored = new Set<number>()
     const selectors = listOf(this.config.snapshotIgnore)
     if (selectors.length === 0) return ignored
-    const document = await cdp.send('DOM.getDocument', { depth: 0 }).catch(() => undefined) as
-      { root?: { nodeId?: number } } | undefined
-    const rootNodeId = document?.root?.nodeId
-    if (rootNodeId === undefined) return ignored
     for (const selector of selectors) {
-      const found = await cdp.send('DOM.querySelectorAll', { nodeId: rootNodeId, selector })
-        .catch(() => undefined) as { nodeIds?: readonly number[] } | undefined
-      for (const nodeId of found?.nodeIds ?? []) {
-        const described = await cdp.send('DOM.describeNode', { nodeId, depth: -1, pierce: false })
+      for (const objectId of await this.matchesInPage(cdp, selector)) {
+        // The formatter drops a marked node together with everything below it,
+        // so this walk only has to name the marked element itself; `pierce`
+        // collects the rest of its subtree anyway, which is the same statement
+        // the drop makes and cannot drift from it.
+        const described = await cdp.send('DOM.describeNode', { objectId, depth: -1, pierce: true })
           .catch(() => undefined) as { node?: DomNode } | undefined
         const walk = (node: DomNode | undefined): void => {
           if (node === undefined) return
@@ -2549,15 +2791,17 @@ export class SessionBrowser {
         + 'call browser_snapshot and use a ref from its result',
       )
     }
-    const document = await cdp.send('DOM.getDocument', { depth: 0 }) as { root?: { nodeId?: number } }
-    const rootNodeId = document.root?.nodeId
-    if (rootNodeId === undefined) throw new Error(`dsh-browser: could not read the page to look up ${target}`)
-    const found = await cdp.send('DOM.querySelector', { nodeId: rootNodeId, selector: target }) as { nodeId?: number }
-    if (found.nodeId === undefined || found.nodeId === 0) {
-      throw new Error(`dsh-browser: no element matches ${target}; check the selector, or take a full snapshot and use a ref`)
-    }
-    const described = await cdp.send('DOM.describeNode', { nodeId: found.nodeId }) as { node?: DomNode }
-    if (described.node?.backendNodeId === undefined) {
+    // The page's own walk, the same one a click's selector uses, so a target
+    // reaches an open shadow root and a same-origin frame — both of which the
+    // tree this narrows already prints. Several names one rather than refusing:
+    // a CSS selector means the first match everywhere else in the platform, and
+    // reading a subtree is not an act on the wrong element.
+    const [first] = await this.matchesInPage(cdp, target)
+    const described = first === undefined
+      ? undefined
+      : await cdp.send('DOM.describeNode', { objectId: first }).catch(() => undefined) as
+        { node?: DomNode } | undefined
+    if (described?.node?.backendNodeId === undefined) {
       throw new Error(`dsh-browser: no element matches ${target}; check the selector, or take a full snapshot and use a ref`)
     }
     return { backendNodeId: described.node.backendNodeId, described: target }
@@ -2705,7 +2949,14 @@ export class SessionBrowser {
         if (options.key !== undefined) await dispatchInput(cdp, { type: 'key', key: options.key })
         return watch
       }
-      if (target === undefined) return await this.settle(before, {}, await write())
+      if (target === undefined) {
+        const report = await this.settle(before, {}, await write())
+        // A call that names no element is the one whose whole effect can be
+        // "the focus moved": the caller cannot see where a bare Shift+Tab
+        // sent it, and the next Enter lands wherever that was.
+        const focused = await this.readFocus()
+        return focused === undefined ? report : { ...report, focused }
+      }
       const { target: resolved, recovered, result } = await this.actOn(target, async (found) => {
         await cdp.send('DOM.scrollIntoViewIfNeeded', { backendNodeId: found.backendNodeId }).catch(() => {})
         // The focus is not taken on trust: a control that cannot be focused —
@@ -2734,6 +2985,187 @@ export class SessionBrowser {
         recovered,
       }, result)
     })
+  }
+
+  /**
+   * Choose options on a native `<select>`, and say which ones were chosen.
+   *
+   * A `<select>`'s popup belongs to the browser process, not the page: a press
+   * opens it, but the options have no box, so a click on one has nowhere to land
+   * (measured 2026-09-29: `Clicked combobox`, then a refusal for the option
+   * having no visible box, whose advice could never come true). The selection is
+   * set on the element and the page's own `input`/`change` events are dispatched,
+   * which is the shape the reference runtime's `select(ref, values)` has.
+   * @param target - a ref from a snapshot of the current page, or a locator to
+   * resolve now.
+   * @param values - the option values or visible labels to choose.
+   * @param options - how to answer a dialog the selection opens.
+   * @returns the element, where the page ended up, and which options it chose.
+   * @throws {Error} when the target names no element or several, is not a
+   * `<select>`, is disabled, or none of the values is one of its options.
+   */
+  async select(
+    target: ElementTarget,
+    values: readonly string[],
+    options: { dialog?: DialogPolicy } = {},
+  ): Promise<ActionReport> {
+    return await this.underPolicy(options.dialog, async () => {
+      await this.ensure()
+      const started = this.page
+      const before = await this.stateOf(started)
+      const cdp = this.cdpSession()
+      const { target: resolved, recovered, result } = await this.actOn(target, async (found) => {
+        // Armed before the events go out: a page that reacts inside its own
+        // change handler has finished by the time the protocol call returns.
+        const watch = await this.armSettle(cdp, started)
+        const chosen = await this.chooseOptions(cdp, found, values)
+        return { watch, chosen }
+      })
+      const report = await this.settle(before, {
+        element: { role: resolved.role, name: resolved.name },
+        recovered,
+      }, result.watch)
+      return { ...report, selected: [...result.chosen] }
+    })
+  }
+
+  /**
+   * Set a checkbox or radio's state, and say what it ended in.
+   *
+   * The reference runtime's `check(ref, checked)`. A click is the wrong tool for
+   * a control whose meaning is a state: one that does not reflect `checked` into
+   * an attribute changes no DOM, so the report says "did not change" and the
+   * caller cannot tell a switch it flipped from one the page ignored.
+   * @param target - a ref from a snapshot, or a locator to resolve now.
+   * @param checked - the state to set.
+   * @param options - how to answer a dialog the change opens.
+   * @returns the element, where the page ended up, and the state it holds.
+   * @throws {Error} when the target names no element or several, is not a
+   * checkbox or radio, or is disabled.
+   */
+  async check(
+    target: ElementTarget,
+    checked: boolean,
+    options: { dialog?: DialogPolicy } = {},
+  ): Promise<ActionReport> {
+    return await this.underPolicy(options.dialog, async () => {
+      await this.ensure()
+      const started = this.page
+      const before = await this.stateOf(started)
+      const cdp = this.cdpSession()
+      const { target: resolved, recovered, result } = await this.actOn(target, async (found) => {
+        const watch = await this.armSettle(cdp, started)
+        const state = await this.setChecked(cdp, found, checked)
+        return { watch, state }
+      })
+      const report = await this.settle(before, {
+        element: { role: resolved.role, name: resolved.name },
+        recovered,
+      }, result.watch)
+      return { ...report, checked: result.state }
+    })
+  }
+
+  /**
+   * Resolve the element a caller named and ask it one in-page question.
+   *
+   * The sharing this exists for is the protocol half every in-page question has:
+   * the node is resolved from its backend id, and the page answers with a value.
+   * @param cdp - session attached to the active page.
+   * @param target - the element the ref names.
+   * @param question - what to ask the element.
+   * @returns what the page answered, or `undefined` when it answered nothing.
+   */
+  private async askElement(cdp: CDPSession, target: RefTarget, question: string): Promise<unknown> {
+    const resolved = await cdp.send('DOM.resolveNode', { backendNodeId: target.backendNodeId })
+      .catch(() => undefined) as { object?: { objectId?: string } } | undefined
+    const objectId = resolved?.object?.objectId
+    if (objectId === undefined) return undefined
+    const answer = await cdp.send('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: question,
+      awaitPromise: true,
+      returnByValue: true,
+    }).catch(() => undefined) as { result?: { value?: unknown } } | undefined
+    return answer?.result?.value
+  }
+
+  /**
+   * Choose options on the `<select>` the element belongs to.
+   * @param cdp - session attached to the active page.
+   * @param target - the element the ref names.
+   * @param values - the option values or visible labels to choose.
+   * @returns the labels that were chosen.
+   * @throws {Error} when the element is not a select, is disabled, or none of the values matches.
+   */
+  private async chooseOptions(
+    cdp: CDPSession,
+    target: RefTarget,
+    values: readonly string[],
+  ): Promise<readonly string[]> {
+    const said = readSelect(await this.askElement(cdp, target, selectProbe(values)))
+    if (said.kind === 'not-select') {
+      throw new Error(
+        `dsh-browser: ${elementName(target)} is not a <select>, so there are no options to choose; `
+        + 'if the page draws its own list, click the control and then the option, or set the value '
+        + 'with browser_evaluate',
+      )
+    }
+    if (said.kind === 'disabled') {
+      throw new Error(
+        `dsh-browser: ${elementName(target)} is disabled, so the page would ignore a selection and `
+        + 'nothing was selected; wait for the page to enable it',
+      )
+    }
+    if (said.kind === 'missing') {
+      const missed = (said.missed ?? []).map(value => JSON.stringify(value)).join(', ')
+      const choices = (said.choices ?? []).map(value => JSON.stringify(value)).join(', ')
+      const shown = choices === '' ? '(none)' : choices
+      throw new Error(
+        `dsh-browser: ${missed} is not an option of ${elementName(target)}, and nothing was selected; `
+        + `its options are ${shown}`,
+      )
+    }
+    if (said.kind !== 'selected' || said.selected === undefined) {
+      throw new Error(
+        `dsh-browser: the page did not say whether ${elementName(target)} took the selection; nothing `
+        + 'was selected, so take a new snapshot and check the element',
+      )
+    }
+    return said.selected
+  }
+
+  /**
+   * Set the checked state of a checkbox or radio.
+   * @param cdp - session attached to the active page.
+   * @param target - the element the ref names.
+   * @param checked - the state to set.
+   * @returns the state the control ended in.
+   * @throws {Error} when the element is not checkable or is disabled.
+   */
+  private async setChecked(cdp: CDPSession, target: RefTarget, checked: boolean): Promise<boolean> {
+    const said = readCheck(await this.askElement(cdp, target, checkProbe(checked)))
+    if (said.kind === 'not-checkable') {
+      const tag = said.tag === undefined || said.tag === '' ? 'the element' : said.tag
+      const type = said.type === undefined || said.type === '' ? '' : '[type=' + said.type + ']'
+      throw new Error(
+        `dsh-browser: ${elementName(target)} is a ${tag}${type}, not a checkbox or radio, so its `
+        + 'checked state cannot be set; if the page draws its own switch, click it instead',
+      )
+    }
+    if (said.kind === 'disabled') {
+      throw new Error(
+        `dsh-browser: ${elementName(target)} is disabled, so the page would ignore the change and `
+        + 'nothing was changed; wait for the page to enable it',
+      )
+    }
+    if (said.kind !== 'set' || said.checked === undefined) {
+      throw new Error(
+        `dsh-browser: the page did not say whether ${elementName(target)} took the change; nothing was `
+        + 'changed, so take a new snapshot and check the element',
+      )
+    }
+    return said.checked
   }
 
   /**
@@ -2786,7 +3218,11 @@ export class SessionBrowser {
     if (only !== undefined) return only
     throw candidates.length === 0
       ? locateMissError(target)
-      : locateAmbiguousError(target, candidates)
+      // Each candidate is named by its ref when the page has one: the refusal
+      // has to tell the caller which of the two identically named controls is
+      // which, and a ref is the only handle an action can be aimed at.
+      : locateAmbiguousError(target, candidates, candidate =>
+        this.labels.labelFor(candidate.backendNodeId, candidate.role, candidate.name).label)
   }
 
   /**
@@ -2811,6 +3247,52 @@ export class SessionBrowser {
   }
 
   /**
+   * The page's own matches for a CSS selector, as handles to ask about.
+   *
+   * The walk is the page's (see `selectorProbe`), so a match can be inside an
+   * open shadow root or a same-origin frame — the scope the accessibility tree
+   * splices and the DOM agent's query selectors cannot follow. A selector the
+   * page cannot parse is refused by name here, once for every caller: reported
+   * as "no element matches" it would send the caller looking for another
+   * element instead of at its own typo.
+   * @param cdp - session attached to the active page.
+   * @param selector - what the caller wrote.
+   * @returns one object id per match, in the page's own order.
+   * @throws {Error} when the page refuses the selector.
+   */
+  private async matchesInPage(cdp: CDPSession, selector: string): Promise<string[]> {
+    let count = 0
+    try {
+      const answer = await cdp.send('Runtime.evaluate', {
+        expression: selectorProbe(selector, MATCH_SLOT),
+        returnByValue: true,
+      }) as {
+        result?: { value?: unknown }
+        exceptionDetails?: { exception?: { description?: string } }
+      }
+      if (answer.exceptionDetails !== undefined) {
+        throw new Error(answer.exceptionDetails.exception?.description ?? 'the page refused it')
+      }
+      if (typeof answer.result?.value === 'number') count = answer.result.value
+    } catch (error) {
+      throw new Error(
+        `dsh-browser: the page refused the selector ${JSON.stringify(selector)}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    const handles: string[] = []
+    for (let index = 0; index < count; index += 1) {
+      const handle = await cdp.send('Runtime.evaluate', {
+        expression: `globalThis.${MATCH_SLOT}[${String(index)}]`,
+        returnByValue: false,
+      }).catch(() => undefined) as { result?: { objectId?: string } } | undefined
+      const objectId = handle?.result?.objectId
+      if (objectId !== undefined) handles.push(objectId)
+    }
+    return handles
+  }
+
+  /**
    * The elements a CSS selector matches, read through the page.
    *
    * The walk is the page's own (see `selectorProbe`), so a match carries the
@@ -2826,36 +3308,8 @@ export class SessionBrowser {
    */
   private async locateBySelector(selector: string, nodes: readonly AxNode[]): Promise<Located[]> {
     const cdp = this.cdpSession()
-    let count = 0
-    try {
-      const answer = await cdp.send('Runtime.evaluate', {
-        expression: selectorProbe(selector, MATCH_SLOT),
-        returnByValue: true,
-      }) as {
-        result?: { value?: unknown }
-        exceptionDetails?: { exception?: { description?: string } }
-      }
-      if (answer.exceptionDetails !== undefined) {
-        throw new Error(answer.exceptionDetails.exception?.description ?? 'the page refused it')
-      }
-      if (typeof answer.result?.value === 'number') count = answer.result.value
-    } catch (error) {
-      // A selector the page cannot parse is a question that was never asked,
-      // and reporting it as "no element matches" would send the caller looking
-      // for another element instead of at its own typo.
-      throw new Error(
-        `dsh-browser: the page refused the selector ${JSON.stringify(selector)}: `
-        + `${error instanceof Error ? error.message : String(error)}`,
-      )
-    }
     const found: Located[] = []
-    for (let index = 0; index < count; index += 1) {
-      const handle = await cdp.send('Runtime.evaluate', {
-        expression: `globalThis.${MATCH_SLOT}[${String(index)}]`,
-        returnByValue: false,
-      }).catch(() => undefined) as { result?: { objectId?: string } } | undefined
-      const objectId = handle?.result?.objectId
-      if (objectId === undefined) continue
+    for (const objectId of await this.matchesInPage(cdp, selector)) {
       const described = await cdp.send('DOM.describeNode', { objectId, depth: 0 }).catch(() => undefined) as { node?: { backendNodeId?: number; nodeName?: string } } | undefined
       const backendNodeId = described?.node?.backendNodeId
       if (backendNodeId === undefined) continue
@@ -2983,6 +3437,25 @@ export class SessionBrowser {
       await sleep(50)
     }
     return { url: page.url(), title: '', origin: 0 }
+  }
+
+  /**
+   * Where the keyboard focus is now, named the way a snapshot names an element.
+   *
+   * Read from the accessibility tree rather than from the page's own
+   * activeElement, because a role and a name are what the caller needs and the
+   * tree is where names live; the reference runtime reports the same fact on its
+   * computer-use side as focus_changed plus the focused element's title. A page
+   * that cannot be asked — one that is being replaced — answers nothing, and
+   * nothing is reported rather than a guess.
+   * @returns the focused element, or undefined when none is or the page would not say.
+   */
+  private async readFocus(): Promise<ElementRef | undefined> {
+    try {
+      return focusedInTree(await this.fullTree(this.cdpSession()))
+    } catch {
+      return undefined
+    }
   }
 
   /**

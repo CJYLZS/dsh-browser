@@ -16,7 +16,7 @@ Status: implemented
 `browser_click` / `browser_type` 的元素参数从"必须是 ref"扩成"ref **或** 一个定位"（[`src/browser/locate.ts`](../../../../src/browser/locate.ts)）：
 
 - **三种定位形态**：`role`（可配 `name`）、`text`、`selector`。语义是**三选一**，不是叠过滤器；同时给两个会被拒绝，而不是悄悄按其中一个收窄——写了两个的调用方要的是这里没实现的东西，猜它指哪一半正是点错元素的来路。
-- **在动作那一刻解析**：`name`/`text` 是大小写不敏感的子串，匹配读**无障碍树**（`Accessibility.getFullAXTree`），所以"定位能匹配到的"恰好就是"快照会打印出来的"。`selector` 交给 DOM（`DOM.querySelectorAll` + `DOM.describeNode`）再按 `backendDOMNodeId` 映回树，因此能触达无障碍树没描述的元素。
+- **在动作那一刻解析**：`name`/`text` 是大小写不敏感的子串，匹配读**无障碍树**（`Accessibility.getFullAXTree`），所以"定位能匹配到的"恰好就是"快照会打印出来的"。`selector` 走**页内走查**（`selectorProbe`：先把选择器交给页面自己解析、错选择器据此另报，再逐元素 `matches()`，进得去开着的影子根与同源帧），命中后按 `backendDOMNodeId` 映回树，因此能触达无障碍树没描述的元素。
 - **命中 0 个**：立即报错，点名调用方写的那句定位，并指向 `browser_snapshot`。选择器本身被页面拒绝时**另报**（"页面拒绝了 selector"），不混成"没有元素匹配"——后者会让调用方去找另一个元素，而错的是问题本身。
 - **命中多个**：**拒绝**，并把每个候选连同它**最近的具名祖先**列出来（`button "Open" — in dialog "Settings" < RootWebArea "Dashboard"`）。拒绝才是这个功能的价值所在：挑一个会点到调用方没指名的元素，报 0 个会把非空页面说成空的。名单是让拒绝可用的那一半——两个同名控件之间，祖先名通常是唯一能把它们分开的事实。祖先链只取最近的三个具名者，无名的包装层跳过而不是印成 `generic ""`；确实没有具名祖先的候选项写 `no named ancestor`。
 - **祖先链有三种状态，不是两种**（2026-09-29 真机补上）：**有**祖先名 → `in region "Running" < RootWebArea …`；树描述了它而祖先都没名字 → `no named ancestor`；**树根本没描述这个元素**（`selector` 能触达、无障碍树看不见）→ `not described by the accessibility tree`。第三种是这次真机发现补上的：`selector` 走的是 DOM，早先的实现在这条路上直接填了空数组，于是同一对元素用 `text` 问是 `in RootWebArea "The Internet"`、用 `selector` 问却是 `no named ancestor`——把"没查过"说成了"页面没说过"。修法是把树的那次查找复用过来（`entryInTree()`，`src/browser/locate.ts`），树不描述时才让 `trail` **缺席**，而缺席与空数组在拒绝里各有各的说法。
@@ -27,6 +27,7 @@ Status: implemented
 - **`text` 是那个不猜 role 的口**：猜错 role 的代价是实打实的——承载输入的元素在无障碍树里可能是 `textbox`、`searchbox`、`combobox`、`spinbutton`，猜错就得到"没有元素匹配"并被迫再取一次快照，而那正是这一项要消灭的往返。参照系的技能文档把这条写成了硬规则（"Do not replace a snapshot-proven `heading` with a guessed `link` role"），所以两个工具都必须有一个按名匹配、不带 role 的口。
 - **顺带给改名的代价兜底**：按 MCP 的扁平 `browser_type(text: …)` 习惯写 `{ref, text}` 的调用方会被拒，而拒绝里会指名正确参数（"pass them as value"）——否则这条错误读起来像是在抱怨定位，而调用方真正错的只是一个参数名。
 - **无名接收者的消息也能用了**（本项验收的第三条）：`elementName` 不再把无名元素印成 `svg ""`，只印角色——引号里的空字符串读起来像消息本身出了 bug。
+- **同一支走查服务三处调用方（2026-09-29 补，一次不一致的收口）**：`browser_snapshot` 的 `target=<selector>` 与 `snapshotIgnore` 原本各自走 `DOM.querySelector(All)`，而那个搜索面只是主文档的浅层——于是出现"**树里有、选择器找不到**"：影子根里的元素在快照里明明印着，`target="#inside"` 却答 `no element matches`（[真机过一遍](../testing/2026-09-29-real-page-verification.md) 记的就是这个形状，只是当时只修了定位这一支）。现在三处都在 `matchesInPage` 这一支上，`rg "DOM.querySelector" src/` 一处不剩。`target=` 命中多个时**取第一个**：CSS 选择器在平台别处也都是这个意思，而"打印这棵子树"不是对元素动手，没有点错的风险。
 - **一处由真机补上的候选规则（2026-09-29 晚些时候）**：**祖先已经说过同一句话的文本 run 不算第二个答案**。起因是 [`browser_wait`](2026-09-29-browser-wait.md) 的真机回归：`{ text: "engine ready" }` 在一个刚被插入的按钮上同时命中**按钮**与**它内部的 `StaticText`**（按钮这类角色会从内容计算无障碍名），于是"命中多个"的拒绝把一次本来唯一的定位判成了歧义，等待回报的也是那个 run——而 run 是任何动作都够不着的（快照从不给它 mint ref）。**但不能简单丢弃文本 run**：`<div>Loading…</div>` 这种普通容器自己不算名字，run 是唯一说得出话的节点（实测：`role="status"` 的 div 也**不会**从内容取名），丢了它，页面上那句话就再也找不到。所以规则与快照的过滤同源——快照不打印"祖先已经说过的 run"，定位也就不把这种 run 算作候选；`locateInTree` 里按"匹配到的祖先"逐个判断（`src/browser/locate.ts`），并因此把 `isTextRun` 这个谓词收进 `aria.ts` 一处。
 
 ## 与既有决定的关系
@@ -66,6 +67,8 @@ Status: implemented
 - **PTC 门禁需要一行额外覆盖**：`PTC_CALLS` 里 click/type 仍用 ref 形态（那是主要形态，也验证了旧路径没坏），另外四条断言把一个**定位**当参数送过 `run_code` 桥、确认 `browser_type` 能不猜 role 找到输入框、并确认 `ref`+定位与 `name` 无 `role` 两种误用都以可捕获的拒绝到达程序里。
 - **子串匹配意味着定位可能比调用方预期命中更多**——这正是拒绝兜住的失败模式，但"只有一个候选"时仍可能点到刚变成别的东西的按钮（下一轮那篇 Risks 里已记的那条，没有消除，只是让它可见）。
 - **每次动作多一次 `Accessibility.getFullAXTree`**（selector 形态再多几次 DOM 调用）。有上限、可取消，但它是纯增的开销。
+- **快照侧那两处收口的代价量过**（2026-09-29）：`snapshotIgnore` 是每次快照都跑的热路径（默认就配了一条 `[data-dsh-browser-ignore]`），页内走一遍全 DOM 在 github.com/trending 的 3394 个元素上 **2.1 ms**，原生 `querySelectorAll` 0.2 ms——而一次快照本来要拉整棵 AX 树，2 ms 是噪声。`snapshotIgnore` 仍用 `describeNode({ depth: -1, pierce: true })` 收 id，但**真正裁掉整棵子树的是格式化器的 `dropWholeSubtree`**，`pierce` 只是让收集到的 id 与"丢掉整棵"这句话一致，两者不会各自漂移。
+- **单测到 458 条**（三处走查各改一条断言：选择器不再问 DOM agent、`target=` 的坏选择器按"页面拒绝了选择器"报；另加一条）；真机回归到 **96/96**，新增 [30]：影子根里的元素在树里、`target="#inside"` 印出 `- button "Shadow button"`、`target="#inner"` 进得了同源 `srcdoc` 帧，而影子根里被 `data-dsh-browser-ignore` 标记的按钮不再打印。**重启 dsh 之后又走了一遍工具面**（9 条，全绿）：影子根与同源帧里的 `target=`、坏选择器按"页面拒绝了选择器"报、按 `selector` 点进影子根与帧（两处页面自己的 handler 都真的跑了）、命中多个取文档序第一个、两处被标记的节点都不进树。
 - **`selector` 与树形态同时给出时按交集处理**（既要匹配选择器、又要匹配 role/name）。工具层不提供这个组合，所以它是库层的诚实语义而非可达路径。
 - **无障碍树没描述的元素只能用 `selector` 触达**，且它的候选名只能是标签（`div`），因为确实没有别的名字可给。
 - **改名有一个已知的迁移代价**：按 MCP 扁平 `browser_type(text: …)` 习惯写 `{text: "x"}`（想输入当前焦点）的调用方，现在会被当成定位搜索，得到 `no element matches text "x"`。失败是响亮的、可捕获的，而且错误信息里把 `text` 当定位这件事会教它改；`{ref, text}` 那种写法则直接被拒绝并指名 `value`。代价是一次往返，不是静默写错地方。

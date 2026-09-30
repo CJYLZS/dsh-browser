@@ -62,6 +62,16 @@ export interface Located extends RefTarget {
 const TRAIL_DEPTH = 3
 
 /**
+ * How many candidates an ambiguity refusal lists before it counts the rest.
+ *
+ * The reference's strict mode stops at ten and says there are more (measured in
+ * playwright-core 1.61: `_generateSelectors` caps the list and appends `...`),
+ * because a locator like `role=button` can match a whole page and an error is
+ * not a snapshot.
+ */
+const AMBIGUOUS_MAX = 10
+
+/**
  * How a caller's locator is named in a message.
  *
  * It quotes the locator rather than the element, because the element is what
@@ -215,17 +225,36 @@ export function locateMissError(locator: Locator): Error {
  * @param candidates - every element that answered it.
  * @returns the error to throw.
  */
-export function locateAmbiguousError(locator: Locator, candidates: readonly Located[]): Error {
-  const lines = candidates.map((candidate, index) => {
+export function locateAmbiguousError(
+  locator: Locator,
+  candidates: readonly Located[],
+  refOf?: (candidate: Located) => string | undefined,
+): Error {
+  const listed = candidates.slice(0, AMBIGUOUS_MAX)
+  const lines = listed.map((candidate, index) => {
     const trail = candidate.trail
     const where = trail === undefined
       ? 'not described by the accessibility tree'
       : trail.length === 0 ? 'no named ancestor' : `in ${trail.join(' < ')}`
-    return `\n  ${String(index + 1)}. ${candidate.role} ${JSON.stringify(candidate.name)} — ${where}`
+    const ref = refOf?.(candidate)
+    const handle = ref === undefined ? '' : ` [ref=${ref}]`
+    return `\n  ${String(index + 1)}. ${candidate.role} ${JSON.stringify(candidate.name)} — ${where}${handle}`
   })
+  if (candidates.length > listed.length) {
+    lines.push(`\n  … and ${String(candidates.length - listed.length)} more`)
+  }
+  // A caller told to narrow by name cannot use that advice when no candidate has
+  // a name: measured 2026-09-29 on a shadow-DOM page whose two icon buttons read
+  // identically, where every line was a duplicate of the last and the only way
+  // in was a ref. The ref is the one fact each line can still carry.
+  const nameless = candidates.every(candidate => candidate.name === '')
+  const advice = nameless
+    ? 'None of them has an accessible name, so a name cannot tell them apart: '
+      + 'call browser_snapshot and act on the ref of the one you mean.'
+    : 'Narrow it with a name that is unique, or call browser_snapshot and act on the ref of the one you mean.'
   return new Error(
     `dsh-browser: ${describeLocator(locator)} matches ${String(candidates.length)} elements:`
-    + `${lines.join('')}\nNarrow it with a name that is unique, or call browser_snapshot and act on the ref of the one you mean.`,
+    + `${lines.join('')}\n${advice}`,
   )
 }
 

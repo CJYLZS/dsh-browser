@@ -45,6 +45,11 @@ test('an action that changed nothing says so rather than leaving it to be guesse
   // second identical press, so the sentence says what it is evidence *of*.
   assert.match(text, /not a verdict on the action/)
   assert.match(text, /look further rather than pressing again/)
+  // What the list can and cannot see is part of reading it honestly: only DOM
+  // mutations are watched, so a value written straight into a control leaves no
+  // record, and a caller that expected one has to read the control back.
+  assert.match(text, /Only DOM mutations are listed/)
+  assert.match(text, /an input's value, a checkbox's checked, a select's selectedIndex/)
 })
 
 test('an action that changed the page names what changed', () => {
@@ -294,6 +299,19 @@ test('a result says which dialog the page asked and how it was answered', () => 
   // The model's next move is the one that matters: dismissing is the answer
   // that changes nothing, and a call can only answer a dialog it announced.
   assert.match(text, /Pass dialog: "accept" on the call that opens it/)
+})
+
+test('a dialog that was already open is reported as not this call\u2019s', () => {
+  const text = actionText('Clicked button "Delete"', report({
+    dialogs: [{
+      type: 'confirm',
+      message: 'Discard changes?',
+      defaultValue: '',
+      handled: 'dismissed',
+      earlier: true,
+    }],
+  }), TABS)
+  assert.match(text, /and was dismissed\. \(it was already open when this call began/)
 })
 
 test('a prompt that was accepted says what it was answered with', () => {

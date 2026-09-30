@@ -172,7 +172,10 @@ export function changedText(report: ActionReport): string {
   }
   if (what === '') {
     return 'The page did not change. That is what the page says, not a verdict on the action: '
-      + 'read it as "nothing observable happened yet" and look further rather than pressing again.'
+      + 'read it as "nothing observable happened yet" and look further rather than pressing again. '
+      + 'Only DOM mutations are listed, so a value written straight into a control — an input\'s '
+      + 'value, a checkbox\'s checked, a select\'s selectedIndex — leaves no record; read the '
+      + 'control back when that is what the action was for.'
   }
   return `The page changed${what}.`
 }
@@ -306,7 +309,13 @@ export function dialogsText(dialogs: readonly DialogReport[]): string {
   const lines = dialogs.map((dialog) => {
     const answer = dialog.answer === undefined ? '' : ` with ${JSON.stringify(dialog.answer)}`
     const handled = dialog.handled === 'accepted' ? `accepted${answer}` : 'dismissed'
-    return `A ${dialog.type} dialog asked ${JSON.stringify(dialog.message)} and was ${handled}.`
+    // Where it came from is part of what it says: a dialog the pane's own user
+    // opened is answered by the default policy and sits in the buffer, and a
+    // result that claimed it would be reporting an action that never happened.
+    const from = dialog.earlier === true
+      ? ' (it was already open when this call began, so this call did not open it)'
+      : ''
+    return `A ${dialog.type} dialog asked ${JSON.stringify(dialog.message)} and was ${handled}.${from}`
   })
   if (dialogs.some(dialog => dialog.handled === 'dismissed')) {
     lines.push(
@@ -586,6 +595,7 @@ const DIALOG_SCHEMA = {
       defaultValue: { type: 'string', required: true },
       handled: { type: 'string', required: true, enum: ['accepted', 'dismissed'] },
       answer: { type: 'string' },
+      earlier: { type: 'boolean' },
     },
   },
 } as const
@@ -1005,12 +1015,17 @@ function waitCondition(args: {
  */
 function asResult(
   report: ActionReport,
-): Omit<ActionReport, 'dialogs' | 'changes'> & { dialogs?: DialogReport[]; changes?: DomChange[] } {
-  const { dialogs, changes, ...rest } = report
+): Omit<ActionReport, 'dialogs' | 'changes' | 'selected'> & {
+  dialogs?: DialogReport[]
+  changes?: DomChange[]
+  selected?: string[]
+} {
+  const { dialogs, changes, selected, ...rest } = report
   return {
     ...rest,
     ...dialogs === undefined ? {} : { dialogs: [...dialogs] },
     ...changes === undefined ? {} : { changes: [...changes] },
+    ...selected === undefined ? {} : { selected: [...selected] },
   }
 }
 
@@ -1146,12 +1161,18 @@ export function registerTools(ctx: Context, pool: BrowserPool): void {
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'browser_click',
-    description: 'Click an element, with real mouse events at the element\'s own position. Name the element with a ref from browser_snapshot, or — when the page re-rendered and the ref is refused, or two controls share a name — with role+name, text, or a CSS selector, which are resolved when the click runs. Reports the element, the address the page ended on, whether the page changed and the first few changes it made, and what received the click when something was over it. A press the page says another element would receive is refused; pass force to send it anyway. An element the page says is disabled is refused too, and force does not bypass that: the page would drop the press either way.',
+    description: 'Click an element, with real mouse events at the element\'s own position — or act on it as a control instead of pressing it: pass select to choose options on a <select> (its popup is the browser\'s and its options have no box to press, so the selection is set and the page\'s own input/change events are dispatched), or checked to set a checkbox or radio. Name the element with a ref from browser_snapshot, or — when the page re-rendered and the ref is refused, or two controls share a name — with role+name, text, or a CSS selector, which are resolved when the call runs. Reports the element, the address the page ended on, whether the page changed and the first few changes it made, what received the click when something was over it, and the option labels or checked state a select or checked call set. A press the page says another element would receive is refused; pass force to send it anyway. An element the page says is disabled is refused too, and force does not bypass that: the page would drop the press either way.',
     parameters: {
       ...TARGET_PARAMETERS,
       force: { type: 'boolean', description: 'Click even when the page says another element would receive the press, such as an overlay. What received it is then reported instead of refused. It does not bypass an element the page says is disabled, which would drop the press either way.' },
       button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Which button presses; left unless given. A right click is how a page\'s own context menu opens.' },
       double: { type: 'boolean', description: 'Send the two press-release pairs a page reads as one double click, instead of one click.' },
+      select: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Choose these options on the <select> the target names, matching each value against an option\'s value or its visible label, instead of pressing at a point. A native select cannot be driven by clicks, so the selection is set and the page\'s own input/change events are dispatched — the reference runtime\'s select(ref, values). The result says which labels were chosen.',
+      },
+      checked: { type: 'boolean', description: 'Set the checkbox or radio the target names to this state, instead of pressing at a point — the reference runtime\'s check(ref, checked). A control that does not reflect its state into an attribute changes no DOM, so a click on it says "did not change" while this says what it became.' },
       ...DIALOG_PARAMETERS,
     },
     output: {
@@ -1161,35 +1182,65 @@ export function registerTools(ctx: Context, pool: BrowserPool): void {
         properties: {
           ref: { type: 'string' },
           ...ACTION_PROPERTIES,
+          selected: { type: 'array', items: { type: 'string' } },
+          checked: { type: 'boolean' },
           tabs: TABS_SCHEMA,
         },
       },
       render: (args, value) => [{
         type: 'text',
-        text: actionText(
-          `${args.double === true ? 'Double-clicked' : 'Clicked'} ${describeElement(value.element)}`
-          + `${args.button === undefined || args.button === 'left' ? '' : ` with the ${args.button} button`}`,
-          value,
-          value.tabs,
-        ),
+        text: actionText(clickSubject(args, value), value, value.tabs),
       }],
     },
     async execute(args, exec) {
       const browser = browserFor(pool, exec)
       const target = elementTarget(args, 'browser_click')
+      const choosing = args.select !== undefined
+      const checking = args.checked !== undefined
       if (target === undefined) {
         throw new Error(
-          'dsh-browser: browser_click needs an element: pass a ref from browser_snapshot, '
-          + 'or role+name, text, or selector to find it when the click runs',
+          choosing || checking
+            ? 'dsh-browser: browser_click needs an element to select or check: pass a ref from '
+              + 'browser_snapshot, or role+name, text, or selector to find it when the call runs'
+            : 'dsh-browser: browser_click needs an element: pass a ref from browser_snapshot, '
+              + 'or role+name, text, or selector to find it when the click runs',
         )
       }
-      const report = await cancelable(browser, exec.signal, `clicking ${describeTarget(args, target)}`, () =>
-        browser.click(target, {
-          ...args.force === undefined ? {} : { force: args.force },
-          ...args.button === undefined ? {} : { button: args.button },
-          ...args.double === undefined ? {} : { double: args.double },
-          ...dialogOptions(args),
-        }))
+      if (choosing && checking) {
+        throw new Error(
+          'dsh-browser: browser_click was given both select and checked; a select chooses options '
+          + 'and a checkbox has a checked state, so give one of them',
+        )
+      }
+      if ((choosing || checking) && (args.force !== undefined || args.button !== undefined || args.double !== undefined)) {
+        throw new Error(
+          'dsh-browser: browser_click was given select or checked together with force, button, or '
+          + 'double; a selection is not a mouse press, so give one side or the other',
+        )
+      }
+      if (choosing && args.select !== undefined && args.select.length === 0) {
+        throw new Error(
+          'dsh-browser: browser_click was given an empty select; name at least one option value '
+          + 'or visible label',
+        )
+      }
+      const report = await cancelable(
+        browser,
+        exec.signal,
+        choosing
+          ? `selecting on ${describeTarget(args, target)}`
+          : checking ? `setting the checked state of ${describeTarget(args, target)}`
+            : `clicking ${describeTarget(args, target)}`,
+        () => choosing
+          ? browser.select(target, args.select ?? [], dialogOptions(args))
+          : checking
+            ? browser.check(target, args.checked ?? false, dialogOptions(args))
+            : browser.click(target, {
+              ...args.force === undefined ? {} : { force: args.force },
+              ...args.button === undefined ? {} : { button: args.button },
+              ...args.double === undefined ? {} : { double: args.double },
+              ...dialogOptions(args),
+            }))
       return {
         ...args.ref === undefined ? {} : { ref: args.ref },
         ...asResult(report),
@@ -1219,20 +1270,13 @@ export function registerTools(ctx: Context, pool: BrowserPool): void {
           value: { type: 'string' },
           key: { type: 'string' },
           ...ACTION_PROPERTIES,
+          focused: ELEMENT_SCHEMA,
           tabs: TABS_SCHEMA,
         },
       },
       render: (args, result) => [{
         type: 'text',
-        text: actionText(
-          result.value === undefined || result.value === ''
-            ? `Pressed ${JSON.stringify(args.key ?? '')}`
-              + `${result.element === undefined ? ' on whatever the page has focused' : ` in ${describeElement(result.element)}`}`
-            : `Typed ${JSON.stringify(result.value)} into ${describeElement(result.element)}`
-              + `${args.key === undefined ? '' : ` and pressed ${JSON.stringify(args.key)}`}`,
-          result,
-          result.tabs,
-        ),
+        text: actionText(typedSubject(args, result), result, result.tabs),
       }],
     },
     async execute(args, exec) {
@@ -1451,6 +1495,74 @@ export function registerTools(ctx: Context, pool: BrowserPool): void {
     },
     timeoutMs: EVALUATE_TIMEOUT_MS,
   })), 'dsh-browser: browser_evaluate')
+}
+
+/**
+ * What a browser_click call did, in the wording its mode calls for.
+ *
+ * Three actions share one tool because they share one verb — act on the element
+ * this names — and the result has to say which of them happened: a press,
+ * a selection, or a checked state. The page's answer wins over the request
+ * (the labels it actually chose, the state it actually holds), because a page is
+ * free to normalize either one.
+ * @param args - the call's arguments, for the mode it asked for.
+ * @param value - what the call reported.
+ * @returns the subject line the action text starts with.
+ */
+function clickSubject(
+  args: {
+    readonly select?: readonly string[]
+    readonly checked?: boolean
+    readonly double?: boolean
+    readonly button?: string
+  },
+  value: {
+    readonly element?: ActionReport['element']
+    readonly selected?: readonly string[]
+    readonly checked?: boolean
+  },
+): string {
+  if (args.select !== undefined || value.selected !== undefined) {
+    const chosen = (value.selected ?? args.select ?? []).map(entry => JSON.stringify(entry)).join(', ')
+    return `Selected ${chosen} on ${describeElement(value.element)}`
+  }
+  if (args.checked !== undefined || value.checked !== undefined) {
+    const state = (value.checked ?? args.checked) === true ? 'checked' : 'unchecked'
+    return `Set ${describeElement(value.element)} to ${state}`
+  }
+  return `${args.double === true ? 'Double-clicked' : 'Clicked'} ${describeElement(value.element)}`
+    + `${args.button === undefined || args.button === 'left' ? '' : ` with the ${args.button} button`}`
+}
+
+/**
+/**
+ * What a typing call did, in the one wording both of its halves use.
+ *
+ * A call that named an element says where the text went; a call that named
+ * none says where the focus was, which is the only thing the caller did not
+ * already know. The two used to read differently for the same fact ("into the
+ * element" against "on whatever the page has focused"), and the focus case said
+ * nothing about where a focus-moving key had just put it.
+ * @param args - the call's arguments, for the key it pressed.
+ * @param result - what the call reported, including the focus it read.
+ * @returns the subject line the action text starts with.
+ */
+function typedSubject(
+  args: { readonly key?: string },
+  result: {
+    readonly value?: string
+    readonly element?: ActionReport['element']
+    readonly focused?: ActionReport['element']
+  },
+): string {
+  const where = result.element !== undefined
+    ? describeElement(result.element)
+    : result.focused === undefined ? 'the focused element' : describeElement(result.focused)
+  if (result.value === undefined || result.value === '') {
+    return `Pressed ${JSON.stringify(args.key ?? '')} on ${where}`
+  }
+  return `Typed ${JSON.stringify(result.value)} into ${where}`
+    + `${args.key === undefined ? '' : ` and pressed ${JSON.stringify(args.key)}`}`
 }
 
 /**
