@@ -73,7 +73,7 @@ lib/dsh-browser/
 
 **输入**：`Input.dispatchMouseEvent`（move/pressed/released/wheel）、`Input.dispatchKeyEvent`（keyDown/keyUp/rawKeyDown/char）、`Input.insertText`。
 
-**WS 路由**：`registerUpgrade({path:'/dsh-browser/stream'})`，二进制 JPEG 下行、JSON 上行（attach / resize / 输入事件）。客户端从页面同源连 `ws(s)://${location.host}/dsh-browser/stream`。
+**WS 路由**：`registerUpgrade({path:'/dsh-browser/stream'})`，二进制 JPEG 下行、JSON 上行（attach / resize / 输入事件）。客户端连的是 **Host 的 origin**：shell 用 `__DSH_TRANSPORT__.streamBaseUrl` 发布它，没有就退回 `location.origin`——Desktop 的窗口是 `dsh-app://app` 文档，页面同源连法在那里永远是 `ws://app/…`（见[那一篇](../bug-fix/2026-09-30-desktop-stream-origin.md)）。
 
 **安全（必须做）**：自定义路由不经过 gateway 的 trusted-host 拦截器，handler 必须自己判信任——复用 `@deepseek-ai/dsh-client-connection` 的 `isTrustedApiRequest(request, trustedHosts)`（与 gateway 同一判据；若未公开导出则实现同一套 loopback/trustedHosts 规则）。否则 `host: 0.0.0.0` 时局域网任何人都能驱动本机浏览器。
 

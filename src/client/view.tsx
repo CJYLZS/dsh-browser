@@ -17,6 +17,7 @@ import { clipboardChord, clipboardReply, pasteMessage, type ReadingChord } from 
 import { AddressGlobe } from './glyph.ts'
 import { keyMessage } from './keys.ts'
 import { targetIdOf } from './pages.ts'
+import { streamUrl } from './stream-url.ts'
 import { en, type DshBrowserKey } from './locales.ts'
 
 /** Absolute path the host serves the mirror on. */
@@ -328,12 +329,11 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
   }, [])
 
   useEffect(() => {
-    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const query = new URLSearchParams({ session: sessionId })
+    const query: Record<string, string> = { session: sessionId }
     // A tab names its page; the socket is bound to that page, so its frames,
     // its input, and its address bar are the page's whether or not the tools
     // act on it right now.
-    if (pageId !== undefined) query.set('page', pageId)
+    if (pageId !== undefined) query.page = pageId
     // A pane with no page is the browser entry's own: it exists to hold the page
     // this ask produces, so it asks for one. This is the only thing that opens a
     // page on the user's behalf — a browser already running gets a tab of its
@@ -341,7 +341,7 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
     if (pageId === undefined && tabId !== undefined) {
       void openPageRequest(sessionId, tabId).catch(() => {})
     }
-    const socket = new WebSocket(`${scheme}//${location.host}${STREAM_PATH}?${query.toString()}`)
+    const socket = new WebSocket(streamUrl(STREAM_PATH, query))
     socket.binaryType = 'arraybuffer'
     socket.onopen = () => { setConnected(true) }
     socket.onclose = () => { setConnected(false) }
