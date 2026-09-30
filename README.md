@@ -56,13 +56,13 @@ Then install with the `#<tag>` ref that version pairs with — a build targets o
 
 | Your dsh | Plugin version | Install command |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.2.2 (latest) | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.2` |
+| ≥ 0.1.7-rc.1 | v0.2.3 (latest) | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.3` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
 For a dsh on the current generation, the latest release is:
 
 ```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.2
+dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.3
 ```
 
 The built `lib/` is committed with each tag, so a tag install needs no build step. The profile's `package.json` records the ref you chose; to change versions, re-add with the new ref, and to remove the plugin use `dsh plugin remove --profile web dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
@@ -72,7 +72,7 @@ The built `lib/` is committed with each tag, so a tag install needs no build ste
 The Desktop app owns its own profile, and the ordinary CLI refuses to manage `--profile desktop` on purpose, so install through the Desktop CLI that ships with the app:
 
 ```sh
-"<Desktop install dir>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.2
+"<Desktop install dir>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.3
 ```
 
 Use `<Desktop install dir>/resources/runtime/cli/bin/dsh` on macOS and Linux. Restart the app afterwards, the same way the Web profile restarts after `dsh plugin add`; the same `remove` verb uninstalls it.
