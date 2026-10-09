@@ -186,7 +186,7 @@ test('the status report says what is running and what the limit is', async () =>
   assert.equal(report.maxInstances, 3)
   assert.deepEqual(report.instances.map(instance => instance.sessionId), ['session-a'])
   assert.equal(report.instances[0]?.state, 'ready')
-  assert.equal(report.instances[0]?.debugPort, 9333)
+  assert.equal(report.instances[0]?.debugPort, 9038)
 })
 
 test('the pool status read carries every browser fresh tab list', async () => {

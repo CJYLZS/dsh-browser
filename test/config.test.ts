@@ -19,8 +19,8 @@ test('an empty configuration resolves to the documented defaults', () => {
     executablePath: '',
     headless: true,
     userDataDir: '',
-    debugPortMin: 9333,
-    debugPortMax: 9400,
+    debugPortMin: 9038,
+    debugPortMax: 9237,
     viewportWidth: 1440,
     viewportHeight: 900,
     stealth: true,
@@ -47,7 +47,7 @@ test('one field does not disturb the others', () => {
   const resolved = resolve({ headless: false, debugPortMin: 9222 })
   assert.equal(resolved.headless, false)
   assert.equal(resolved.debugPortMin, 9222)
-  assert.equal(resolved.debugPortMax, 9400)
+  assert.equal(resolved.debugPortMax, 9237)
   assert.equal(resolved.quality, 70)
   assert.equal(resolved.channel, 'chrome')
 })
