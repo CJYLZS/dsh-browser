@@ -21,7 +21,7 @@ Status: implemented
 - **命中时回报的是页面给的答案**（`element` 的 role+name，来自无障碍树），不是调用方写的那句条件。
 - **它等已经打开的那一页**，不会为了等而启动浏览器：一个从不存在的页面上等 10 s 没有任何意义。
 
-## 参照系实测（2026-09-29；同 [探针](../../../../.prove/zcode-action-surface.mjs) 那一批产物）
+## 参照系实测（2026-09-29；同探针 `.prove/zcode-action-surface.mjs` 那一批产物）
 
 - **等待在参照系里是一等原语**，而且**只等页面状态**：`locator.waitFor({state: "attached"|"detached"|"visible"|"hidden", timeoutMs?})`、`page.waitForLoadState({state?, timeoutMs?})`、`page.waitForURL(url, {timeoutMs?, waitUntil?})`、`expectNavigation(action, {url?})`。`networkidle` 明确**不支持**。
 - **没有谓词等待**：`waitForFunction` / `poll` 一处都没有。连它也不给"轮询任意表达式"——那件事在我们这里归 `browser_evaluate`（`wait` 因此**不做 `expression` 条件**，见替代方案 3）。

@@ -36,7 +36,7 @@ dom: +1 status "先在实例表里点一行"; ~ p "24.1k" → "24.2k"; ~ button 
 - **画不出来的元素不计入。** `script`/`style`/`link`/`meta`/`title`/`template`/`noscript`/`base` 的增删改直接跳过：CSS-in-JS 几乎每次渲染都重写一个 `<style>`，留着它就会把 5 个名额填成页面的机器。**跳过的不算省略**——"没写进去"和"不值得写"是两件事。`mutations` 仍然把它们数进去，所以 `mutations > 0` 而清单为空是可能且诚实的。
 - **同一条变化只说一次**：按（节点 × 种类 × 属性名）去重，两次改同一个按钮的 `disabled` 是一条变化。`mutations` 是**记录数**，`changesOmitted` 是**去重后的条数**，两个计数单位不同也各自说清。
 
-### 参照系实测（2026-09-29；探针 [`.prove/zcode-action-surface.mjs`](../../../../.prove/zcode-action-surface.mjs)）
+### 参照系实测（2026-09-29；探针 `.prove/zcode-action-surface.mjs`）
 
 三个可读的层各自量过一遍（量的是**字面出现次数**，这些产物是压缩过的，出现 0 次就是那个能力不在那一层）：`browser-use/0.5.1` 与 `0.4.2` 的 `scripts/browser-client.mjs`（模型面运行时）、`browser-use/0.4.2/dist/mcp/server.js`（页面侧服务；**0.5.1 这个缓存里根本没有 `dist/`**，它的 `main` 指向同包里不存在的文件，所以能量的最新服务端是 0.4.2）、`node-repl-host/0.6.0/dist/mcp/server.js`（REPL 宿主）。
 

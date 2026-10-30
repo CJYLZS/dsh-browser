@@ -7,5 +7,10 @@ node_modules/
 # running the scripts rather than read from the repository.
 .prove/
 
+# Recovery records written when the Windows sandbox has to repair this
+# workspace's file permissions (see the diagnose-windows-sandbox-acl skill).
+# They describe one machine's ACL, not the plugin.
+.acl-recovery/
+
 # The built bundle is committed (lib/), so that a GitHub install needs no build
 # step. Its source maps are part of that bundle and are committed with it.

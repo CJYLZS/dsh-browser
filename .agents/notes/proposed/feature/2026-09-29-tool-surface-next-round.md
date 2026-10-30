@@ -106,7 +106,7 @@ Status: proposed
 
 ## 参照系实测（下一轮：P1-3 起，2026-09-29）
 
-探针 [`.prove/zcode-action-surface.mjs`](../../../../.prove/zcode-action-surface.mjs) 量四个可读产物（`browser-use` 0.5.1/0.4.2 的客户端、0.4.2 的服务端、`node-repl-host` 0.6.0）里的字面出现次数；接口面另读 `docs/api.json`、`docs/playwright.md`、`skills/control-browser/SKILL.md`。**注意 0.5.1 的缓存里没有 `dist/`**（`main` 指向不存在的文件），所以能量的最新服务端是 0.4.2。
+探针 `.prove/zcode-action-surface.mjs` 量四个可读产物（`browser-use` 0.5.1/0.4.2 的客户端、0.4.2 的服务端、`node-repl-host` 0.6.0）里的字面出现次数；接口面另读 `docs/api.json`、`docs/playwright.md`、`skills/control-browser/SKILL.md`。**注意 0.5.1 的缓存里没有 `dist/`**（`main` 指向不存在的文件），所以能量的最新服务端是 0.4.2。
 
 ### P1-3 等条件：参照系把它当**一等原语**，但只等**页面状态**
 

@@ -15,11 +15,10 @@ import type { SessionIdOf } from '@deepseek-ai/dsh-client-ui-slots'
 import { BrowserBody } from './view.tsx'
 import { BrowserTitle } from './title.tsx'
 import { followBrowserPages } from './reveal.ts'
+import { followPageCloses } from './close.ts'
 import { BrowserSettingsSection } from './settings.tsx'
 import type { BrowserSettingsView } from './settings-layout.ts'
-import { BROWSER_ID, BROWSER_KIND, browserDefinition } from './definition.ts'
-import { markClosing, targetIdOf } from './pages.ts'
-import { closePageRequest } from './api.ts'
+import { BROWSER_ID, browserDefinition } from './definition.ts'
 import { BrowserGlyph } from './glyph.ts'
 import { NS, en, zh, type DshBrowserKey } from './locales.ts'
 
@@ -76,15 +75,7 @@ export function apply(ctx: ClientContext): void {
   // Closing a tab is closing the page it mirrored. The kit's own removal path
   // asks this handler first, which is what makes the rule hold no matter how
   // the close arrived — the strip's ✕, a menu, or the pane itself.
-  ctx.sidebarRight.registerCloseHandler(BROWSER_KIND, (sessionId, tab) => {
-    const targetId = targetIdOf(tab.contentId)
-    // A tab that names no page (the guide entry's) has nothing to close.
-    if (targetId === undefined) return
-    markClosing(sessionId, targetId)
-    // The tab is going away either way; the close travels on its own, and a
-    // close that never lands brings the tab back on a later look.
-    void closePageRequest(sessionId, targetId).catch(() => {})
-  })
+  followPageCloses(ctx)
   // The page appears only while the Host serves this namespace: a deployment
   // that never loaded the plugin's host half has no configuration to edit, so
   // the page registers nothing and the tab shows no trace of it.

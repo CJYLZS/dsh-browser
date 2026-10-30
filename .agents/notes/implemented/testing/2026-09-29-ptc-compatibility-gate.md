@@ -25,7 +25,7 @@ Status: implemented
 
 ## 参数侧其实不是静默的（实测，推翻了最初的判断）
 
-最初写进测试文件顶部的理由是"给 schema 加一个不支持的 key，SDK 会**静默**把它 render 成 `unknown`"。实测把它推翻了（探针 [`ptc-loud-or-silent.mjs`](../../../../.prove/ptc-loud-or-silent.mjs)）：
+最初写进测试文件顶部的理由是"给 schema 加一个不支持的 key，SDK 会**静默**把它 render 成 `unknown`"。实测把它推翻了（探针 `.prove/ptc-loud-or-silent.mjs`）：
 
 - `defineTool` 的 value-schema DSL 在**构造时**就拒绝子集外的关键字——参数是 `parameters.a.pattern is not supported by the value schema DSL`，输出的 value schema 同样被拒。所以正常写法下那个洞**不可达**，不是静默的。
 - 仍然可达的一半在别处：`jsonSchemaToTs` 对子集外的 schema 返回 `unknown` **且不抛**，而 `register()` 接受一个**没过 DSL 的手工 `ToolDefinition`**——实测它被生成成 `handmade: unknown;`。

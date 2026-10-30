@@ -6,7 +6,7 @@ Status: implemented
 
 在侧栏面板里按 `Ctrl+C` / `Ctrl+V`：`Ctrl+A` 正常（选中页面），复制没有任何事情发生、粘贴没反应。第一层缺陷在键盘那一轮就修掉了（面板单独按 Ctrl 时把它拼成 `Control+Control`，host 拒收，而拒收被面板显示成带「重启浏览器」的整屏提示）。剩下的是这一层：**这三个键根本到不了镜像页**，所以"让页面自己去复制粘贴"这条路是堵死的。
 
-实测（2026-09-25，插件正在跑的那个浏览器 = `channel: chrome`、headless、Windows、`Chrome/153.0.8010.53`；探针 [`clipboard-commands-probe.mjs`](../../../../.prove/clipboard-commands-probe.mjs)，它把 fixture 写进镜像页、从外部用 CDP 派发按键、再读回页面状态）：
+实测（2026-09-25，插件正在跑的那个浏览器 = `channel: chrome`、headless、Windows、`Chrome/153.0.8010.53`；探针 `.prove/clipboard-commands-probe.mjs`，它把 fixture 写进镜像页、从外部用 CDP 派发按键、再读回页面状态）：
 
 - 同一个 fixture 上，`Ctrl+K`、`Ctrl+A`、`Ctrl+Z` 都在页面里留下 `keydown`；`Ctrl+C`、`Ctrl+V`、`Ctrl+X` **一条都没有**。
 - CDP `Input.dispatchKeyEvent` 的 `commands` 字段是通的：`Ctrl+a` 带 `commands: ["moveToEndOfLine"]` 把光标从 0 移到了 10。
