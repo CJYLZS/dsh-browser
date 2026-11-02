@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { closeBrowserRequest, closePageRequest, openPageRequest } from '../src/client/api.ts'
+import { closeBrowserRequest, closePageRequest, openPageRequest, restartRoute } from '../src/client/api.ts'
 
 /** The real fetch, restored after every test. */
 const realFetch = globalThis.fetch
@@ -87,3 +87,24 @@ test('closing a browser names the session rather than a page, and asks for all o
   recordingFetch({ status: 401 })
   await assert.rejects(() => closeBrowserRequest('session-a'), /HTTP 401/)
 })
+
+test('the restart control falls back to the page ask when there is no socket', () => {
+  // The regression this exists for: watching never starts a browser, so after a
+  // close from the settings page the host closes the socket. A message sent then
+  // is dropped by send() in silence, and the one control that could bring the
+  // browser back did nothing — exactly when it was needed.
+  assert.deepEqual(restartRoute(false, 'tab-1'), { via: 'http' })
+  // The page ask must carry a tab id, because that is what keeps a second click
+  // from opening a second page; a pane that cannot name its tab has nothing to
+  // ask with and must not pretend otherwise.
+  assert.deepEqual(restartRoute(false, undefined), { via: 'none' })
+  assert.deepEqual(restartRoute(false, ''), { via: 'none' })
+})
+
+test('a socket that is up carries the restart, because the host already holds it', () => {
+  // Asking over HTTP while a viewer socket is live would open a page the pane
+  // is not watching; the socket is the connection the host knows this pane by.
+  assert.deepEqual(restartRoute(true, 'tab-1'), { via: 'socket' })
+  assert.deepEqual(restartRoute(true, undefined), { via: 'socket' })
+})
+

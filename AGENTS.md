@@ -90,3 +90,46 @@
 - **临时 profile 由假启动器负责删。** `ensure()` 在调用 launcher **之前**就 `mkdtemp` 了一个 `dsh-browser-*` 目录，而测试从不 close 自己的浏览器，所以没有任何生产代码会去删它们：修之前每跑一次 `pnpm test` 就往 `%TEMP%` 里丢一个目录（实测单次 45 个）。`test/support/browser.ts` 记录交给它的临时目录，并在自己的 `after` 钩子里删掉。它删的是**自己见过的**目录，不是 `%TEMP%\dsh-browser-*` 通配——另一个 dsh 实例正在跑的浏览器也是这个名字，删了就是删别人的浏览器（`test/support.test.ts` 把这条钉住了）。跑完 `pnpm test` 后 `%TEMP%` 里不该多出任何**临时 profile 目录**（`dsh-browser-<随机后缀>` 那类），这是这一条的可验证形式；`dsh-browser-shots` / `dsh-browser-snapshots` / `dsh-browser-results` 是跑着的实例共享的固定目录，测试只删自己写进去的文件，不删目录。
 - **真机那一半在 `scripts/`，不在 `test/`**：`pnpm run regression`（`scripts/snapshot-regression.mjs`）跑固定任务集、快照不变量与**动作层**（[10]–[18]：同步反应被记成 `dom`、跨页旧 ref 被拒、被遮挡的点击默认拒绝且 `force` 能穿过、`*` 只标真新增、函数被调用、**滚动页上的点击落在元素上**、**被取消的调用放弃并放开页面**、**同一段声明跑两次不被当成语法错误**、**只读 / 禁用字段被拒（禁用那条理由来自元素自身状态，因为页面拒绝了聚焦）且文字确实没落进去**；[22]：**一次点击里的三种变化各自被报成结构化的一条**；[23]：**等待真的等到后来出现的元素、等到的元素能被同一句定位操作、元素与它内部的文本 run 只算一个答案**；[24]：**页面自己说的三件事（console 调用、未捕获异常、浏览器日志）各自被捕获、级别与来源正确、导航后清空**；[25]：**整页截图的尺寸是文档、元素截图不与页面一同滚动、页面坐标裁剪不需要先滚动**；[26]：**同一对同名按钮用 `text` 与 `selector` 各问一次都被拒、且都列出 `region "Running"` / `region "Idle"` 这两个祖先，什么都没被按下**；[27]：**同址的两个空白页仍是两个 CDP target、状态列表各带标题、按 target 关掉一页浏览器还在、指名页面的 viewer 真的收到那一页的帧**；[28]：**同源子帧里的控件进得了快照、能被 ref 点中，原生 `<select>` 与不把状态反射成属性的 checkbox 由 `select`/`checked` 设置并回报结果**；[29]：**无元素的按键报出焦点落在哪个控件上（`Tab`、再一次 `Tab`、`Shift+Tab` 各报一次），而页面上没有任何可聚焦控件时报 `undefined` 而不是 `RootWebArea`**；[30]：**`target=` 的选择器进得了开着的影子根与同源帧，`snapshotIgnore` 在影子根里也盖得住——这三处选择器解析现在是同一次页内走查**），产物在 `.prove/snapshot-regression/`；`pnpm run probe`（`scripts/ax-probe.mjs`）挂到**已运行**浏览器的 CDP 端口上量真实 AX 树，并同时按 300/500 两个预算输出行数、截断与字符数，用来和 `.prove/ax-probe/before.txt` 对拍。CI 里没有浏览器，所以这两条不进 `pnpm test`。**回归 fixture 必须有一个比视口高的页面**：`scrollY = 0` 的页面上"视口坐标"和"页面坐标"是同一个数，坐标类缺陷在那种 fixture 上永远测不出来。
 - 在 DSH 沙箱里 `pnpm test` 会因为测试运行器给每个文件起子进程（管道 stdio）而 EPERM；本地想不开提权就先 `node --test --test-isolation=none "test/**/*.test.ts"` 跑同一批用例，但**最终仍要跑一次真正的 `pnpm test`**（隔离不同，跨文件泄漏只有它能发现）。
+
+## 真机验证（Web profile，隔离在 `D:\dsh-verify\`）
+
+**为什么必须隔离。** 2026-10-31 一次真机验证误删了 `~/.dsh` 的 `sessions/` 与 `storages/`，历史会话全丢、回收站里也没有（说明是永久删除）。此后每一次真机验证都跑在独立 `DSH_HOME` 下：**物理上碰不到 `~/.dsh`**。这不是洁癖，是那次事故的直接教训。
+
+**不要用 desktop profile 验证。** `desktop` 由 Electron 独占（`args.ts` 的 `rejectElectronProfile` 会直接拒绝），而且它的 `dsh-browser` 来自 `github:CJYLZS/dsh-browser`，不是你工作区刚构建的 `lib/`。验证本地改动必须让 profile 依赖指向工作区：
+
+```jsonc
+// D:\dsh-verify\home\profiles\webtest\package.json
+{
+  "dsh": { "profile": { "bundles": [
+    "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-browser"
+  ] } },
+  "dependencies": { "dsh-browser": "file:D:\\code\\deepseek-harness\\lib\\dsh-browser" }
+}
+```
+
+`web` 模板本身**不含 `dsh-browser`**（`PROFILE_TEMPLATES.web` 只有 `dsh-base` + `dsh-web-app`），插件是靠 profile 自己的 `bundles` 列表挂上去的。
+
+**token 只有父进程 stdout 有，而且读得到。** 它是 `processLaunchToken()` 用 `randomBytes` 生成的**内存值**，不落盘、无接口可读——但 `pnpm dsh` 启动时会把完整 URL 打出来。所以**自己启动、自己读日志**，不要让用户转述：
+
+```powershell
+$env:DSH_HOME='D:\dsh-verify\home'
+& $node $pnpm run dsh --profile webtest --port 9060 --no-open *> 'D:\dsh-verify\server.log'
+```
+
+- `--profile webtest` **已经指定了 profile，不能再写 `web`**（会报 `too many arguments`）
+- 服务是常驻进程：**不要对启动它的 job 用 `wait: true`**，它永远不返回。用 `run_in_background` + 读日志文件。
+- `pnpm run` 的输出经管道会被缓冲，job_output 可能一直为空；**重定向到文件**才拿得到那行 `dsh web: http://...?token=...`。
+
+**免 token 的替代路径**（读 `browser-auth.ts` 得到的事实）：`authorizeIndex` 对**有效 cookie 直接放行**，token 只在首次换 cookie 时需要。所以同一个浏览器上下文里刷新不会再要 token；换浏览器或换端口就要重新走一遍 URL。
+
+**验证清单。** 每次动到 view / pages / status / settings 这一层，至少走完：
+
+1. **设置页显示会话名** —— 展开「有浏览器的会话」，行首应是标题；没挂 `sessionQuery` 时是「未命名会话」，**绝不能是 `session-xxxxxxxx`**。
+2. **设置页关闭浏览器** —— 点行尾「关闭浏览器」，该行消失、`GET /dsh-browser/status` 的 `instances` 变空、**CDP 端口真的不再监听**（`Test-NetConnection`，不要只看列表）。
+3. **刷新后不拉起浏览器** —— 关掉之后 `location.reload()`（这比切标签更严格：它会新建 socket），等 8 秒确认 `instances` 仍为空。**这条是 `pool.peek` 的全部意义**，也是唯一能证明"关闭能留住"的操作。
+4. **面板说得出原因** —— 此时面板应显示 `has no browser to watch`。看到这句话才证明走的是 peek 分支，而不是碰巧没启动。
+5. **恢复路径仍然可用** —— 点面板上的「重启浏览器」，浏览器要能真的起来。**这一条曾经是回归**：按钮走 socket，而 `peek` 失败时服务端已经把 socket 关了，`send()` 在 `readyState !== OPEN` 时静默丢弃，于是点击毫无反应。改这一层时务必重跑。
+
+**取证方式**：`/dsh-browser/status` 用 `browser_evaluate` 里的 `fetch` 直接读，比翻 UI 可靠；进程是否真退出用 `Get-CimInstance Win32_Process` 查 `CommandLine` 里的 `dsh-browser` 字样，**别拿 `chrome.exe` 的总数当证据**（用户自己的 Chrome 也在里面）。
+
+**收尾**：杀掉后台 job，删掉 `D:\dsh-verify\home`（确认绝对路径后）。**不要**对 `~/.dsh` 做任何清理动作。

@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react'
 import type { SidebarRightTabInfo, UseSidebarRightTabInfo } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
-import { openPageRequest } from './api.ts'
+import { openPageRequest, restartRoute } from './api.ts'
 import { clipboardChord, clipboardReply, pasteMessage, type ReadingChord } from './clipboard.ts'
 import { AddressGlobe } from './glyph.ts'
 import { keyMessage } from './keys.ts'
@@ -412,6 +412,29 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
   }, [send])
 
   /**
+   * Ask the host for a browser this pane can use again.
+   *
+   * The socket carries the ask when it is up, because that is the connection the
+   * host already holds for this viewer. It is not up in the one case the button
+   * exists for: watching never starts a browser, so a session whose browser was
+   * closed from the settings page has no socket at all — the host refused the
+   * subscription and closed it. Sending there would be dropped in silence by
+   * {@link send}, which is what made this button do nothing exactly when it was
+   * needed. The HTTP ask is the path that does start a browser, so it is the
+   * fallback: same page ask the entry makes, under the same tab id, which keeps
+   * a second click from opening a second page.
+   */
+  const restart = useCallback((): void => {
+    const socket = socketRef.current
+    const route = restartRoute(socket !== undefined && socket.readyState === WebSocket.OPEN, tabId)
+    if (route.via === 'socket') {
+      send({ type: 'restart' })
+      return
+    }
+    if (route.via === 'http') void openPageRequest(sessionId, tabId as string).catch(() => {})
+  }, [send, sessionId, tabId])
+
+  /**
    * Arm the clipboard for the chord just pressed.
    *
    * A copy with nothing selected must leave the clipboard alone, and only the
@@ -595,7 +618,7 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
               <span>{note}</span>
               {recoverable
                 ? (
-                  <button type="button" style={style.noteButton} onClick={() => { send({ type: 'restart' }) }}>
+                  <button type="button" style={style.noteButton} onClick={() => { restart() }}>
                     {copy('restart')}
                   </button>
                 )

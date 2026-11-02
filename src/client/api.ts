@@ -140,3 +140,32 @@ export async function closeBrowserRequest(sessionId: string): Promise<void> {
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
 }
+
+/** What the pane's restart control has to do to get a browser back. */
+export type RestartRoute =
+  /** A viewer socket is up: the host already holds this viewer, so ask there. */
+  | { readonly via: 'socket' }
+  /** No socket: watch never starts a browser, so the page ask is the only path. */
+  | { readonly via: 'http' }
+  /** No socket and no tab to ask under; there is nothing this pane can start. */
+  | { readonly via: 'none' }
+
+/**
+ * Decide how the restart control reaches the host.
+ *
+ * The control exists for a browser the pane cannot use, and the pane loses its
+ * socket in exactly the case that matters: watching never starts a browser, so
+ * after a close from the settings page the host refuses the subscription and
+ * closes the socket. A message sent then is dropped in silence, which is how
+ * this control came to do nothing when it was most needed. The page ask over
+ * HTTP is the one path that does start a browser.
+ * @param socketOpen - whether the viewer socket is open right now.
+ * @param tabId - the asking tab's id, which the HTTP ask must carry.
+ * @returns the route the caller should take.
+ */
+export function restartRoute(socketOpen: boolean, tabId: string | undefined): RestartRoute {
+  if (socketOpen) return { via: 'socket' }
+  if (tabId !== undefined && tabId !== '') return { via: 'http' }
+  return { via: 'none' }
+}
+
