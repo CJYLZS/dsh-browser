@@ -54,7 +54,9 @@ test('the temporary profile a launch was handed is removed by the sweep', async 
 test('a configured profile directory is left alone', async () => {
   const base = await mkdtemp(join(tmpdir(), 'dsh-browser-config-'))
   try {
-    const { launch } = await started({ userDataDir: base })
+    // A directory only applies to a mode that keeps profiles; the default mode
+    // ignores it.
+    const { launch } = await started({ profileMode: 'session', userDataDir: base })
     assert.equal(launch.browsers[0]?.profileDir, join(base, 'session-a'))
 
     removeTemporaryProfiles()

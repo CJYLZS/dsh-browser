@@ -34,6 +34,20 @@ export const SNAPSHOT_ATTRIBUTES_DEFAULT = DEFAULT_ATTRIBUTES.join(', ')
 export const SNAPSHOT_IGNORE_DEFAULT = '[data-dsh-browser-ignore]'
 
 /**
+ * A parent profile directory.
+ *
+ * Deliberately a plain string. This schema crosses a wire — the settings shell
+ * rehydrates `Config.toJSON()` into a live schema in the browser — and a
+ * `transform()` does not survive it: its callback travels as source text and is
+ * re-evaluated where nothing it referenced exists, which left the whole browser
+ * section on "loading settings" forever (measured 2026-11-02). Absolute-path
+ * validation therefore happens in the host, at the point the directory is used
+ * (`requireAbsoluteDirectory` in `browser/profile-choice.ts`), where a bad value
+ * fails the launch with a message instead of breaking the page.
+ */
+const PROFILE_DIRECTORY = z.string().default('').volatile()
+
+/**
  * Read a comma-separated configuration list.
  *
  * Both snapshot settings are lists a user types into one settings field: which
@@ -63,26 +77,27 @@ export interface BrowserConfig {
    */
   headless: boolean
   /**
-   * Parent directory of the per-session profiles; empty means fresh temporary
-   * profiles.
+   * Parent directory of the profiles this mode keeps; empty means the default.
    *
-   * Each session's browser gets its own subdirectory here, because a Chrome
-   * profile directory belongs to exactly one running process. Pointing this at
-   * a directory an ordinary browser is using, or at one session's own
-   * subdirectory, fails to open rather than sharing it. In `workspace` mode it
-   * is the parent of one directory per workspace instead.
+   * One directory per shared unit lives under it: per conversation in `session`
+   * mode, per workspace in `workspace` mode, because a Chrome profile directory
+   * belongs to exactly one running process. Pointing this at a directory an
+   * ordinary browser is using, or at one of its own subdirectories, fails to
+   * open rather than sharing it.
+   *
+   * It is a *location*, not a persistence switch: `temp` ignores it entirely
+   * (that mode creates a directory at launch and removes it at close), `session`
+   * defaults to a temporary directory and `workspace` to `<project>/.dsh/browser`
+   * when it is empty. Which modes keep anything is `profileMode`'s answer alone.
    */
   userDataDir: string
   /**
    * Which browsers share a profile directory, and therefore a sign-in.
    *
-   * `temp` shares nothing, `session` gives every conversation its own profile,
-   * and `workspace` gives every conversation in one project the same one — the
-   * mode that makes a site signed into once usable from the next conversation.
-   * `session` with an empty `userDataDir` is a temporary profile, which is what
-   * this plugin did before the mode existed; `workspace` with an empty one
-   * derives the directory from the workspace's own path, so the profile follows
-   * the project without anyone choosing a directory.
+   * `temp` shares nothing and keeps nothing, `session` gives every conversation
+   * its own profile that survives the process, and `workspace` gives every
+   * conversation in one project the same one — the mode that makes a site signed
+   * into once usable from the next conversation.
    */
   profileMode: ProfileMode
   /**
@@ -239,8 +254,15 @@ export const Config = z.object({
   channel: z.union([z.const('chrome'), z.const('msedge')]).default('chrome').volatile(),
   executablePath: z.string().default('').volatile(),
   headless: z.boolean().default(true).volatile(),
-  userDataDir: z.string().default('').volatile(),
-  profileMode: z.union([z.const('temp'), z.const('session'), z.const('workspace')]).default('session').volatile(),
+  // `.default()` after `transform()`, not on the string inside it: a transform
+  // does not carry its inner schema's default, so an absent key would resolve to
+  // `undefined` and every deployment that never set this field would fail.
+  userDataDir: PROFILE_DIRECTORY,
+  // The default keeps nothing, which is what the plugin did before the mode
+  // existed: a deployment that wants sign-ins to survive names a mode. `session`
+  // as a default would quietly start writing profiles for everyone who never
+  // opened this page.
+  profileMode: z.union([z.const('temp'), z.const('session'), z.const('workspace')]).default('temp').volatile(),
   debugPortMin: z.natural().min(1).max(65535).default(9038).volatile(),
   debugPortMax: z.natural().min(1).max(65535).default(9237).volatile(),
   viewportWidth: z.natural().default(1440).volatile(),

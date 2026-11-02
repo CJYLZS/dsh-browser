@@ -18,13 +18,15 @@ import {
   FIELD_COPY,
   FIELD_PLACEMENTS,
   GROUP_COPY,
-  PROFILE_DIR_COPY,
   advancedSummary,
   foldedPlacements,
   instanceLabel,
   instanceLine,
   overriddenCount,
   placementsIn,
+  profileDirHint,
+  profileDirPlaceholder,
+  profileDirVisible,
   statusLine,
   visiblePlacements,
 } from '../src/client/settings-layout.ts'
@@ -93,7 +95,6 @@ test('every labelled row has copy in both shipped languages', () => {
   // names; flattening them here is what lets one loop cover both.
   const rows: { label: DshBrowserKey; hint?: DshBrowserKey }[] = [
     ...Object.values(FIELD_COPY),
-    PROFILE_DIR_COPY,
     ...Object.values(GROUP_COPY).map(entry => ({ label: entry.title, hint: entry.hint })),
   ]
   for (const row of rows) {
@@ -107,6 +108,37 @@ test('every labelled row has copy in both shipped languages', () => {
   for (const placement of FIELD_PLACEMENTS) {
     assert.notEqual(FIELD_COPY[placement.field], undefined, `${placement.field} has no copy`)
   }
+})
+
+test('the directory row exists exactly where a directory can matter', () => {
+  // `temp` keeps nothing, so a parent directory for it would be a setting with
+  // no effect: the page must not offer one.
+  assert.equal(profileDirVisible('temp'), false)
+  assert.equal(profileDirVisible('session'), true)
+  assert.equal(profileDirVisible('workspace'), true)
+})
+
+test('the directory row explains itself differently in each mode that keeps', () => {
+  // Both keeping modes show the row, but it means "a directory per conversation"
+  // in one and "a parent for one directory per project" in the other.
+  assert.notEqual(profileDirHint('session'), profileDirHint('workspace'))
+  assert.notEqual(profileDirPlaceholder('session'), profileDirPlaceholder('workspace'))
+  for (const mode of ['session', 'workspace'] as const) {
+    assert.notEqual(en[profileDirHint(mode)].trim(), '')
+    assert.notEqual(en[profileDirPlaceholder(mode)].trim(), '')
+  }
+})
+
+test('the profile section asks two different questions', () => {
+  // The mode decides who shares and whether anything is kept; the directory
+  // decides only where. One field rendered as two controls is what used to make
+  // the page disagree with the browser, so the label of each says its own thing.
+  assert.notEqual(en.settingsProfileMode, en.settingsProfileDir)
+  assert.notEqual(zh.settingsProfileMode, zh.settingsProfileDir)
+  // The old pair ("Temporary / Persistent directory") answered persistence a
+  // second time; the mode's three options are the only place that is asked.
+  assert.equal('settingsProfileTemp' in en, false)
+  assert.equal('settingsProfilePersistent' in en, false)
 })
 
 test('the fold advertises the fields it hides that the user has changed', () => {

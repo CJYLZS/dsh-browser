@@ -6,11 +6,14 @@
  * field back through the bound scope, so the page never holds a draft that can
  * disagree with what the browser was launched from.
  *
- * The profile mode is the one exception: an empty directory is what selects a
- * fresh temporary profile, so "persistent" has nothing to store until the user
- * names a directory. That choice is local until a path exists, because
- * inventing one would silently create a profile somewhere the user did not ask
- * for.
+ * The profile settings are two questions, not one asked twice: the mode decides
+ * who shares a sign-in and whether anything is kept, and the directory only
+ * decides where. A blank directory is a legitimate answer in every mode — it
+ * means "this mode's own default" — which is why the field is never a switch.
+ *
+ * One row can be absent: the directory row is not rendered in `temp` mode,
+ * because that mode keeps nothing and therefore has no directory to name.
+ * `settings-layout.ts` owns which modes that is, so the rule is testable.
  *
  * Which fields exist, where they sit, and what they are called all come from
  * `settings-layout.ts`: this file only turns each placement into a control. That
@@ -28,12 +31,14 @@ import {
   ADVANCED_GROUPS,
   FIELD_COPY,
   GROUP_COPY,
-  PROFILE_DIR_COPY,
   advancedSummary,
   foldedPlacements,
   instanceLine,
   overriddenCount,
   placementsIn,
+  profileDirHint,
+  profileDirPlaceholder,
+  profileDirVisible,
   sharedCounts,
   statusLine,
   type BrowserSettingsView,
@@ -181,7 +186,6 @@ export function BrowserSettingsSection(
   const snapshot = useSyncExternalStore(subscribe, () => form.getSnapshot())
   // Held above the early returns so the hook order never changes between the
   // loading, unavailable, and ready renders.
-  const [persistentChoice, setPersistentChoice] = useState<boolean | undefined>(undefined)
   const [status, setStatus] = useState<ClientBrowserReport | undefined>(undefined)
   const [statusError, setStatusError] = useState<string | undefined>(undefined)
   const [saveError, setSaveError] = useState<string | undefined>(undefined)
@@ -267,11 +271,6 @@ export function BrowserSettingsSection(
   if (value === undefined) return <p style={styles.intro}>{t('settingsUnavailable')}</p>
 
   const user = (typeof snapshot.user === 'object' && snapshot.user !== null ? snapshot.user : {}) as Record<string, unknown>
-  // A directory is wanted whenever the mode is not the throwaway one: `session`
-  // and `workspace` both keep their logins. In `workspace` the directory may
-  // stay empty — it then derives from the project — but the row is still the
-  // place a user points it somewhere else.
-  const persistent = persistentChoice ?? value.profileMode !== 'temp'
   /** A field the user layer holds, so clearing it restores the composed value. */
   const owns = (field: keyof BrowserSettingsView): boolean => Object.hasOwn(user, field)
   /** A field is overridden once the user layer holds it. */
@@ -286,10 +285,7 @@ export function BrowserSettingsSection(
       hint={hint}
       overridden={owns(field)}
       resetLabel={t('settingsReset')}
-      onReset={() => {
-        if (field === 'userDataDir') setPersistentChoice(undefined)
-        commit(form.unset(field))
-      }}
+      onReset={() => { commit(form.unset(field)) }}
     >
       {control}
     </Row>
@@ -327,7 +323,6 @@ export function BrowserSettingsSection(
             value={value.profileMode}
             onChange={(event) => {
               const next = event.target.value as BrowserSettingsView['profileMode']
-              setPersistentChoice(next !== 'temp')
               write('profileMode', next)
             }}
           >
@@ -337,21 +332,16 @@ export function BrowserSettingsSection(
           </select>
         )
       case 'userDataDir':
+        // A location, not a persistence switch: the mode above already answered
+        // "is anything kept", so this only asks where.
         return (
-          <select
-            style={styles.select}
-            value={persistent ? 'persistent' : 'temp'}
-            onChange={(event) => {
-              const next = event.target.value === 'persistent'
-              setPersistentChoice(next)
-              // Empty is what selects a fresh temporary profile; the persistent
-              // branch keeps the empty value until the user names a directory.
-              if (!next) write('userDataDir', '')
-            }}
-          >
-            <option value="temp">{t('settingsProfileTemp')}</option>
-            <option value="persistent">{t('settingsProfilePersistent')}</option>
-          </select>
+          <input
+            style={styles.input}
+            value={value.userDataDir}
+            spellCheck={false}
+            placeholder={t(profileDirPlaceholder(value.profileMode))}
+            onChange={(event) => { write('userDataDir', event.target.value) }}
+          />
         )
       case 'stealth':
         return (
@@ -453,11 +443,16 @@ export function BrowserSettingsSection(
   /** One placed field as a labelled row. */
   const placedRow = (placement: FieldPlacement): ReactElement => {
     const copy = FIELD_COPY[placement.field]
+    // The directory row is the one field whose meaning — and therefore whose
+    // explanation — changes with another field's value.
+    const hint = placement.field === 'userDataDir'
+      ? profileDirHint(value.profileMode)
+      : copy.hint
     return row(
       t(copy.label),
       placement.field,
       control(placement.field),
-      copy.hint === undefined ? undefined : t(copy.hint),
+      hint === undefined ? undefined : t(hint),
     )
   }
 
@@ -510,24 +505,10 @@ export function BrowserSettingsSection(
         : <p style={styles.save}>{saved ? t('settingsSaved') : ''}</p>}
 
       <div style={styles.group}>
-        {placementsIn('everyday').map(placement => placedRow(placement))}
-        {persistent
-          ? row(
-              t(PROFILE_DIR_COPY.label),
-              'userDataDir',
-              <input
-                style={styles.input}
-                value={value.userDataDir}
-                spellCheck={false}
-                placeholder="D:\\chrome-profile"
-                onChange={(event) => {
-                  setPersistentChoice(true)
-                  write('userDataDir', event.target.value)
-                }}
-              />,
-              PROFILE_DIR_COPY.hint === undefined ? undefined : t(PROFILE_DIR_COPY.hint),
-            )
-          : null}
+        {placementsIn('everyday').map(placement =>
+          // The directory row is the one placed field that can be absent: in
+          // `temp` mode there is no directory to name.
+          placement.field === 'userDataDir' && !profileDirVisible(value.profileMode) ? null : placedRow(placement))}
       </div>
 
       <details style={styles.fold}>

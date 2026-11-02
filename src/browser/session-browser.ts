@@ -3598,12 +3598,20 @@ export class SessionBrowser implements SessionParticipant {
    * the promises this plugin leaves in it. The signal is the one that was
    * measured: a timer question that comes back at all means the event loop
    * answered, and one that never comes back means nothing in that document will
-   * ever come back. A page whose answer is merely unreadable is not evidence of
-   * a suspended document, so it counts as running — a false "it runs" only costs
-   * the bounded wait that now exists anyway (see `readSettle`), while a false
-   * "it does not" would silently stop reporting changes on an ordinary page.
+   * ever come back.
+   *
+   * A timer that misses its budget is not yet a verdict, because a page's main
+   * thread can be busy — a document that is still booting looks exactly like a
+   * suspended one for as long as its script takes to yield. The two are told
+   * apart by synchronous evaluation, which is also what the original measurement
+   * found: a suspended document answers `1+1` in 0–1 ms (nothing runs, so the
+   * protocol call still completes), while a busy page answers neither. So a
+   * missed timer followed by a missed synchronous evaluation is a busy page, and
+   * busy is not cached: the next action asks again, and a later one gets a real
+   * answer. Only "timer missed and synchronous evaluation answered" is the
+   * suspended-document verdict worth remembering.
    * @param origin - `performance.timeOrigin` of the document being asked about.
-   * @returns the verdict for that document.
+   * @returns the verdict for that document; `undefined` while it is too busy to say.
    */
   private async scriptVerdict(origin: number): Promise<{ liveScript?: boolean }> {
     if (origin === 0) return {}
@@ -3620,9 +3628,20 @@ export class SessionBrowser implements SessionParticipant {
       }),
       SCRIPT_PROBE_MS,
     )
-    const runs = probed.settled
-    this.liveScript = { origin, runs }
-    return { liveScript: runs }
+    if (probed.settled) {
+      this.liveScript = { origin, runs: true }
+      return { liveScript: true }
+    }
+    // The timer never answered. Either nothing in this document runs, or its
+    // main thread is busy with something that has not yielded yet — and only the
+    // first is a property of the document worth remembering.
+    const synchronous = await until(this.cdpSession().send('Runtime.evaluate', {
+      expression: '1 + 1',
+      returnByValue: true,
+    }), SCRIPT_PROBE_MS)
+    if (!synchronous.settled) return {}
+    this.liveScript = { origin, runs: false }
+    return { liveScript: false }
   }
 
   /**

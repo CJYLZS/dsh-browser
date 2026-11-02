@@ -2252,7 +2252,16 @@ test('candidates with no name are not told to narrow by a name they do not have'
   })
 })
 
-/** A document whose script never runs: every timer-shaped question hangs. */
+/**
+ * A document whose script never runs: every timer-shaped question hangs, while
+ * synchronous evaluation still answers.
+ *
+ * That split is the measured signature of a suspended document (2026-11-02):
+ * nothing in it runs, so a promise never settles, but a protocol call that needs
+ * no event loop completes in a millisecond. A fake that hung the synchronous
+ * answer too would be describing a *busy* page instead, which the probe must not
+ * confuse with a frozen one.
+ */
 function frozenDocument(page: FakePage, settleHangs = true): void {
   page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
     const expression = String(params['expression'])
@@ -2269,6 +2278,31 @@ function frozenDocument(page: FakePage, settleHangs = true): void {
     if (expression.includes('performance.timeOrigin')) {
       return { result: { value: { url: page.url, title: 'raw file', origin: 1_700_000_009_999 } } }
     }
+    return { result: { value: 'evaluated' } }
+  })
+}
+
+/**
+ * A page whose main thread is busy for the probe's whole budget: neither the
+ * timer nor synchronous evaluation answers, while everything else does.
+ *
+ * This is a document that is still booting, and it looks exactly like a frozen
+ * one from the timer's point of view — which is why the verdict is not allowed
+ * to rest on the timer alone. It is deliberately not a page that hangs every
+ * call: that would model a browser that is gone, and would hang the action for a
+ * reason this probe is not about.
+ */
+function busyDocument(page: FakePage): void {
+  page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
+    const expression = String(params['expression'])
+    if (expression.includes('performance.timeOrigin')) {
+      // Must answer: it is what identifies the document being asked about.
+      return { result: { value: { url: page.url, title: 'booting', origin: 1_700_000_007_777 } } }
+    }
+    // The two calls the verdict rests on. Both miss their budget, which is what a
+    // main thread that has not yielded yet does to them.
+    if (expression.includes('setTimeout') && expression.includes('done(true)')) return new Promise(() => {})
+    if (expression.trim() === '1 + 1') return new Promise(() => {})
     return { result: { value: 'evaluated' } }
   })
 }
@@ -2310,6 +2344,37 @@ test('an ordinary page is still observed, so the verdict is not a blanket "stati
   assert.equal(report.staticDocument, undefined)
   assert.equal(report.mutations, 2)
   assert.ok(report.changed.includes('dom'))
+})
+
+test('a page too busy to answer a timer is not called a document without script', async () => {
+  // Measured in the GUI itself (2026-11-02): the first visit to a freshly started
+  // web profile was reported as a sandboxed document, and the second visit of the
+  // same page was not. The page was not static — it was still booting, and a busy
+  // main thread misses the timer exactly the way a suspended one does. Calling
+  // that "this page runs no script" is wrong in the expensive direction: the
+  // action stops observing an ordinary page and says something false about it.
+  const { browser, page } = await started()
+  await browser.snapshot()
+  busyDocument(page)
+  const report = await browser.click('e2')
+  assert.equal(report.staticDocument, undefined, 'a busy page was reported as a document that runs no script')
+})
+
+test('a busy page is asked again rather than remembered as frozen', async () => {
+  // The verdict is a property of the document, so it is cached — but only once
+  // the document has actually answered. A page that was busy on one action is
+  // still an ordinary page on the next one, so the second action must observe it
+  // rather than skip the probe on the strength of the first.
+  const { browser, page } = await started()
+  await browser.snapshot()
+  busyDocument(page)
+  const first = await browser.click('e2')
+  assert.equal(first.staticDocument, undefined, 'the first action already reported a busy page as static')
+  page.cdp.calls.length = 0
+  observe(page, 1)
+  const report = await browser.click('e2')
+  assert.equal(report.staticDocument, undefined)
+  assert.equal(report.mutations, 1)
 })
 test('a document that freezes between arming and reading does not hang the action', async () => {
   const { browser, page } = await started()

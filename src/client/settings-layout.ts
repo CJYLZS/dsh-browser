@@ -108,9 +108,11 @@ export const FIELD_COPY: Record<keyof BrowserSettingsView, FieldCopy> = {
   // the visible tier: a user who does not find it reads the per-session default
   // as "logins never carry over" rather than as a choice.
   profileMode: { label: 'settingsProfileMode', hint: 'settingsProfileModeHint' },
-  // The hint belongs to the directory row below this one, which only exists in
-  // persistent mode; the mode select explains itself through its options.
-  userDataDir: { label: 'settingsProfile' },
+  // Label and hint both follow the mode, because the field means something
+  // different in each one: a directory name in `session` mode, a parent for one
+  // directory per project in `workspace` mode, and nothing at all in `temp`.
+  // The hint is therefore not a constant here — `profileDirHint()` answers it.
+  userDataDir: { label: 'settingsProfileDir' },
   stealth: { label: 'settingsStealth', hint: 'settingsStealthNote' },
   executablePath: { label: 'settingsExecutable' },
   debugPortMin: { label: 'settingsDebugPortMin', hint: 'settingsDebugPortHint' },
@@ -129,8 +131,45 @@ export const GROUP_COPY: Record<AdvancedGroup, { readonly title: DshBrowserKey; 
   snapshot: { title: 'settingsGroupSnapshot', hint: 'settingsGroupSnapshotHint' },
 }
 
-/** The row that continues the profile field once a directory is wanted. */
-export const PROFILE_DIR_COPY: FieldCopy = { label: 'settingsProfileDir', hint: 'settingsProfileDirHint' }
+/** Modes whose profiles outlive the browser process. */
+const KEEPING_MODES: readonly BrowserSettingsView['profileMode'][] = ['session', 'workspace']
+
+/**
+ * Whether the directory row applies to a mode.
+ *
+ * `temp` keeps nothing, so it has no parent directory to point anywhere: asking
+ * for one would offer a setting that cannot take effect.
+ * @param mode - the profile mode in force.
+ * @returns whether the page shows the directory row.
+ */
+export function profileDirVisible(mode: BrowserSettingsView['profileMode']): boolean {
+  return KEEPING_MODES.includes(mode)
+}
+
+/**
+ * The hint the directory row carries for a mode.
+ *
+ * The field means something different in each keeping mode — one directory per
+ * conversation versus a parent for one directory per project — and a single
+ * sentence cannot say both without being wrong in one of them.
+ * @param mode - the profile mode in force.
+ * @returns the copy key for that mode's explanation.
+ */
+export function profileDirHint(mode: BrowserSettingsView['profileMode']): DshBrowserKey {
+  return mode === 'workspace' ? 'settingsProfileDirHintWorkspace' : 'settingsProfileDirHintSession'
+}
+
+/**
+ * The placeholder the directory field shows for a mode.
+ *
+ * It is the only place the row can say what an empty value will do, and that
+ * answer differs per mode: a default directory, or the project's own.
+ * @param mode - the profile mode in force.
+ * @returns the copy key for that mode's placeholder.
+ */
+export function profileDirPlaceholder(mode: BrowserSettingsView['profileMode']): DshBrowserKey {
+  return mode === 'workspace' ? 'settingsProfileDirPlaceholderWorkspace' : 'settingsProfileDirPlaceholderSession'
+}
 
 /**
  * The placements of one block, in page order.

@@ -78,7 +78,9 @@ test('two sessions get two browsers, two ports, and two profiles', async () => {
 })
 
 test('a session in a directory profile gets its own subdirectory', async () => {
-  const { pool, launch } = poolWith({ userDataDir: 'D:\\profiles' })
+  // The default mode is `temp`, which ignores the directory; this is about what
+  // `session` does with one.
+  const { pool, launch } = poolWith({ profileMode: 'session', userDataDir: 'D:\\profiles' })
   await pool.get('session-a').ensure()
   await pool.get('session-b').ensure()
   const [first, second] = launch.browsers
@@ -212,7 +214,7 @@ test('the pool status read carries every browser fresh tab list', async () => {
 })
 
 test('a session id that cannot name a directory fails before a launch', () => {
-  const { pool, launch } = poolWith({ userDataDir: 'D:\\profiles' })
+  const { pool, launch } = poolWith({ profileMode: 'session', userDataDir: 'D:\\profiles' })
   assert.throws(() => pool.get(''), /empty session id/)
   assert.equal(launch.browsers.length, 0)
 })

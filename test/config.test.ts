@@ -6,6 +6,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import Schema from '@deepseek-ai/schemastery'
 import { plainConfig, Config, listOf, type BrowserConfig } from '../src/config.ts'
 
 /** Resolve a partial configuration the way the plugin does at load. */
@@ -19,7 +20,7 @@ test('an empty configuration resolves to the documented defaults', () => {
     executablePath: '',
     headless: true,
     userDataDir: '',
-    profileMode: 'session',
+    profileMode: 'temp',
     debugPortMin: 9038,
     debugPortMax: 9237,
     viewportWidth: 1440,
@@ -94,3 +95,34 @@ test('a fractional or negative size is rejected', () => {
   assert.throws(() => resolve({ viewportWidth: -1 }))
   assert.throws(() => resolve({ maxInstances: 0 }))
 })
+
+test('the default profile mode keeps nothing, which is what the plugin always did', () => {
+  // `session` as a default would start writing profiles for every deployment
+  // that never opened the settings page; the mode is the one place persistence
+  // is chosen, so its default has to be the non-committal one.
+  assert.equal(resolve({}).profileMode, 'temp')
+})
+
+test('a profile directory is carried as a plain string, so the settings page can edit it', () => {
+  // The schema crosses a wire: the settings shell rehydrates `Config.toJSON()`
+  // into a live schema. A `transform()` does not survive that (its callback
+  // travels as source text and is re-evaluated where nothing it mentions
+  // exists), and the browser settings section stopped rendering entirely. The
+  // absolute-path rule therefore lives in the host, where the directory is used.
+  assert.equal(Config.dict.userDataDir.type, 'string')
+  assert.equal(resolve({ userDataDir: 'relative' }).userDataDir, 'relative')
+})
+
+test('the schema survives the settings shell\'s round trip', () => {
+  // Rehydrate the way the shell does, then check the section would still have
+  // every control it places.
+  const rehydrated = new Schema(JSON.parse(JSON.stringify(Config)) as never)
+  const volatile = Object.entries(rehydrated.dict)
+    .filter(([, field]) => field?.meta?.volatile === true)
+    .map(([field]) => field)
+  assert.deepEqual(volatile.sort(), [
+    'channel', 'debugPortMax', 'debugPortMin', 'executablePath', 'headless', 'profileMode', 'quality',
+    'snapshotAttributes', 'snapshotIgnore', 'stealth', 'userDataDir', 'viewportHeight', 'viewportWidth',
+  ])
+})
+

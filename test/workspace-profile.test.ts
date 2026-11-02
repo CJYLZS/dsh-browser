@@ -9,11 +9,12 @@
  * the widening must not have leaked into them.
  */
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { plainConfig, Config, type BrowserConfig } from '../src/config.ts'
 import { BrowserPool } from '../src/browser/pool.ts'
-import { chooseProfile } from '../src/browser/profile-choice.ts'
+import { chooseProfile, DEFAULT_PROFILE_BASE, profileBaseOf } from '../src/browser/profile-choice.ts'
 import { workspaceProfileDirFor } from '../src/browser/profile.ts'
 import { workspaceProfileBase, type WorkspaceFacts } from '../src/browser/workspace.ts'
 import { fakeLauncher, type FakeLaunch } from './support/browser.ts'
@@ -285,4 +286,89 @@ test('an empty configured base derives from the workspace path', () => {
   assert.equal(workspaceProfileBase('', WORKSPACE), workspaceProfileBase('', WORKSPACE))
   assert.notEqual(workspaceProfileBase('', WORKSPACE), workspaceProfileBase('', OTHER))
   assert.equal(workspaceProfileBase('D:\\profiles', WORKSPACE), 'D:\\profiles')
+})
+
+test('the temp mode keeps nothing even when a directory is configured', () => {
+  // "Temporary" is the mode's answer to whether anything is kept, and a leftover
+  // path in the directory field must not override it: before this, a temp mode
+  // with a directory wrote a persistent profile to that directory while the
+  // settings page hid the field that caused it.
+  const choice = chooseProfile(
+    plainConfig(Config({ profileMode: 'temp', userDataDir: 'D:\\profiles' })),
+    'session-a',
+    lookupOf([WORKSPACE]),
+  )
+  assert.equal(choice.dir, undefined, 'the temp mode opened a persistent profile')
+  // It is still one browser per conversation, so the pool key does not widen.
+  assert.equal(choice.key, 'session-a')
+})
+
+test('the session mode keeps its profiles, under the default directory when none is named', () => {
+  // `session` promises sign-ins that survive the browser. Returning `undefined`
+  // would give it a directory the browser deletes on close, which is the mode's
+  // promise broken silently.
+  const choice = chooseProfile(
+    plainConfig(Config({ profileMode: 'session', userDataDir: '' })),
+    'session-a',
+    lookupOf([WORKSPACE]),
+  )
+  assert.notEqual(choice.dir, undefined, 'the session mode kept nothing')
+  assert.ok(choice.dir?.startsWith(DEFAULT_PROFILE_BASE), choice.dir)
+  assert.ok(choice.dir?.endsWith('session-a'), choice.dir)
+})
+
+test('the default profile base is the one the page tells the user about', () => {
+  // The settings page's placeholder and the resolver must name the same place,
+  // or the page promises a directory the browser never opens.
+  const session = chooseProfile(
+    plainConfig(Config({ profileMode: 'session', userDataDir: '' })),
+    'session-a',
+    lookupOf([WORKSPACE]),
+  )
+  assert.equal(profileBaseOf(plainConfig(Config({ profileMode: 'session', userDataDir: '' }))), DEFAULT_PROFILE_BASE)
+  assert.equal(session.dir, join(DEFAULT_PROFILE_BASE, 'session-a'))
+})
+
+test('a configured directory is the parent in session mode too, not the directory itself', () => {
+  // The field is a location for the mode's own unit, so it never *is* the
+  // profile: two conversations pointing at one directory would otherwise fight
+  // over it, and Chrome hands a second launch on a held directory to the first.
+  const first = chooseProfile(
+    plainConfig(Config({ profileMode: 'session', userDataDir: 'D:\\profiles' })),
+    'session-a',
+    lookupOf([WORKSPACE]),
+  )
+  const second = chooseProfile(
+    plainConfig(Config({ profileMode: 'session', userDataDir: 'D:\\profiles' })),
+    'session-b',
+    lookupOf([WORKSPACE]),
+  )
+  assert.notEqual(first.dir, second.dir)
+  assert.ok(first.dir?.startsWith('D:\\profiles'), first.dir)
+})
+
+test('a relative profile directory is refused where it is used, not where it is edited', () => {
+  // The schema stays a plain string so the settings page can edit it across the
+  // wire; the absolute-path rule is enforced here, when a browser would open the
+  // directory. A relative path resolves against whatever directory the host was
+  // started in, which is a different place in each deployment.
+  for (const relative of ['profiles', '.\\profiles', '../shared']) {
+    assert.throws(
+      () => chooseProfile(
+        plainConfig(Config({ profileMode: 'session', userDataDir: relative })),
+        'session-a',
+        lookupOf([WORKSPACE]),
+      ),
+      /must be absolute/,
+      relative,
+    )
+  }
+  // Every absolute spelling this host can see passes, and so does empty.
+  for (const absolute of ['', 'D:\\profiles', 'D:/profiles', '\\\\server\\share', '/home/me/profiles']) {
+    assert.doesNotThrow(() => chooseProfile(
+      plainConfig(Config({ profileMode: 'session', userDataDir: absolute })),
+      'session-a',
+      lookupOf([WORKSPACE]),
+    ), absolute)
+  }
 })
