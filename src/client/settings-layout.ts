@@ -29,6 +29,7 @@ export interface BrowserSettingsView {
   readonly headless: boolean
   readonly stealth: boolean
   readonly userDataDir: string
+  readonly profileMode: 'temp' | 'session' | 'workspace'
   readonly debugPortMin: number
   readonly debugPortMax: number
   readonly viewportWidth: number
@@ -72,6 +73,7 @@ export interface FieldPlacement {
 export const FIELD_PLACEMENTS: readonly FieldPlacement[] = [
   { field: 'headless', group: 'everyday' },
   { field: 'channel', group: 'everyday' },
+  { field: 'profileMode', group: 'everyday' },
   { field: 'userDataDir', group: 'everyday' },
   { field: 'stealth', group: 'process' },
   { field: 'executablePath', group: 'process' },
@@ -102,6 +104,10 @@ export interface FieldCopy {
 export const FIELD_COPY: Record<keyof BrowserSettingsView, FieldCopy> = {
   headless: { label: 'settingsMode', hint: 'settingsHeadlessNote' },
   channel: { label: 'settingsBrowser' },
+  // The mode is the field that decides who shares a sign-in, so it sits with
+  // the visible tier: a user who does not find it reads the per-session default
+  // as "logins never carry over" rather than as a choice.
+  profileMode: { label: 'settingsProfileMode', hint: 'settingsProfileModeHint' },
   // The hint belongs to the directory row below this one, which only exists in
   // persistent mode; the mode select explains itself through its options.
   userDataDir: { label: 'settingsProfile' },
@@ -202,9 +208,15 @@ export function statusLine(report: ClientBrowserReport | undefined, t: (key: Dsh
  * facts only a running one has.
  * @param instance - one entry of the report.
  * @param t - copy for this namespace.
+ * @param shared - how many conversations use the same process as this one; 1
+ *   means it is this conversation's own, so nothing is said about sharing.
  * @returns the line to show for it.
  */
-export function instanceLine(instance: ClientBrowserStatus, t: (key: DshBrowserKey) => string): string {
+export function instanceLine(
+  instance: ClientBrowserStatus,
+  t: (key: DshBrowserKey) => string,
+  shared = 1,
+): string {
   const state = instance.state === 'ready'
     ? t('settingsInstanceStateRunning')
     : instance.state === 'starting'
@@ -215,9 +227,37 @@ export function instanceLine(instance: ClientBrowserStatus, t: (key: DshBrowserK
   const parts = [instanceLabel(instance, t), state]
   if (instance.debugPort !== undefined) parts.push(`CDP 127.0.0.1:${instance.debugPort}`)
   if (instance.mode !== undefined) parts.push(instance.mode)
-  const pages = instance.tabs?.length ?? 0
+  const pages = instance.ownedPages ?? instance.tabs?.length ?? 0
   if (pages > 0) parts.push(t('settingsInstancePages').replace('{count}', String(pages)))
+  // A row is a conversation, and several of them can be one browser: saying so
+  // is what stops "three rows" from reading as "three processes".
+  if (shared > 1) parts.push(t('settingsInstanceShared').replace('{count}', String(shared)))
   return parts.join(' · ')
+}
+
+/**
+ * How many conversations share each browser process in a report.
+ *
+ * Keyed by the host's `browserId`, which is the pool key: two rows with the same
+ * one are two conversations on one process. A report whose rows carry no
+ * `browserId` — an older host — counts each session as its own, which is what
+ * those rows mean.
+ * @param instances - every row of the report.
+ * @returns one count per session id.
+ */
+export function sharedCounts(instances: readonly ClientBrowserStatus[]): Map<string, number> {
+  const byBrowser = new Map<string, string[]>()
+  for (const instance of instances) {
+    const key = instance.browserId ?? instance.sessionId
+    const held = byBrowser.get(key)
+    if (held === undefined) byBrowser.set(key, [instance.sessionId])
+    else held.push(instance.sessionId)
+  }
+  const counts = new Map<string, number>()
+  for (const sessions of byBrowser.values()) {
+    for (const sessionId of sessions) counts.set(sessionId, sessions.length)
+  }
+  return counts
 }
 
 /**

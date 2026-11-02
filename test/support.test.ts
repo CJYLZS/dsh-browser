@@ -20,7 +20,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { plainConfig, Config, type BrowserConfig } from '../src/config.ts'
-import { PortAllocator, portWindow } from '../src/browser/ports.ts'
+import { BrowserPool } from '../src/browser/pool.ts'
 import { SessionBrowser } from '../src/browser/session-browser.ts'
 import { fakeLauncher, removeTemporaryProfiles, type FakeLaunch } from './support/browser.ts'
 
@@ -34,12 +34,8 @@ const logger = { info: () => {}, warn: () => {} } as unknown as Context['logger'
  */
 async function started(config: Partial<BrowserConfig> = {}): Promise<{ browser: SessionBrowser; launch: FakeLaunch }> {
   const launch = fakeLauncher()
-  const browser = new SessionBrowser('session-a', {
-    config: plainConfig(Config(config)),
-    ports: new PortAllocator(portWindow(9333, 9340), [], async () => true),
-    launch: launch.launch,
-    logger,
-  })
+  const pool = new BrowserPool(plainConfig(Config(config)), logger, launch.launch, async () => true)
+  const browser = pool.get('session-a')
   await browser.ensure()
   return { browser, launch }
 }

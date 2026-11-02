@@ -52,7 +52,7 @@ export function apply(ctx: Context, config: BrowserConfigInput): void {
   // Read through the wrappers on every use, so a settings edit is picked up
   // without the plugin being remounted around it.
   const resolve = (): BrowserConfig => plainConfig(config)
-  const pool = new BrowserPool(resolve(), ctx.logger)
+  const pool = new BrowserPool(resolve(), ctx.logger, undefined, undefined, ctx)
   ctx.effect(() => () => { void pool.closeAll() }, 'dsh-browser: browser lifetime')
   // A disposed session cannot come back, so its browser is a process, a profile,
   // and a CDP port held for a conversation nobody can return to.

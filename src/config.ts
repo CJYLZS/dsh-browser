@@ -13,6 +13,20 @@ import { DEFAULT_ATTRIBUTES } from './browser/aria.ts'
 /** Which installed Chromium-family browser Playwright should start. */
 export type BrowserChannel = 'chrome' | 'msedge'
 
+/**
+ * How a browser's profile directory is chosen, and therefore who shares one.
+ *
+ * The isolation unit is the whole of what this decides: `temp` shares nothing,
+ * `session` gives every conversation its own sign-ins, and `workspace` gives
+ * every conversation in one project the same ones. See
+ * [the workspace profile note](../../.agents/notes/implemented/feature/2026-10-31-workspace-shared-browser-profile.md)
+ * for why the unit is the workspace rather than the conversation.
+ */
+export const PROFILE_MODES = ['temp', 'session', 'workspace'] as const
+
+/** One profile-sharing mode. */
+export type ProfileMode = typeof PROFILE_MODES[number]
+
 /** The whitelisted accessibility properties a snapshot prints, as a schema default. */
 export const SNAPSHOT_ATTRIBUTES_DEFAULT = DEFAULT_ATTRIBUTES.join(', ')
 
@@ -55,9 +69,22 @@ export interface BrowserConfig {
    * Each session's browser gets its own subdirectory here, because a Chrome
    * profile directory belongs to exactly one running process. Pointing this at
    * a directory an ordinary browser is using, or at one session's own
-   * subdirectory, fails to open rather than sharing it.
+   * subdirectory, fails to open rather than sharing it. In `workspace` mode it
+   * is the parent of one directory per workspace instead.
    */
   userDataDir: string
+  /**
+   * Which browsers share a profile directory, and therefore a sign-in.
+   *
+   * `temp` shares nothing, `session` gives every conversation its own profile,
+   * and `workspace` gives every conversation in one project the same one — the
+   * mode that makes a site signed into once usable from the next conversation.
+   * `session` with an empty `userDataDir` is a temporary profile, which is what
+   * this plugin did before the mode existed; `workspace` with an empty one
+   * derives the directory from the workspace's own path, so the profile follows
+   * the project without anyone choosing a directory.
+   */
+  profileMode: ProfileMode
   /**
    * Lowest external CDP port a session browser may listen on.
    *
@@ -157,6 +184,7 @@ export interface BrowserConfigVolatile {
   executablePath: Volatile<string>
   headless: Volatile<boolean>
   userDataDir: Volatile<string>
+  profileMode: Volatile<ProfileMode>
   debugPortMin: Volatile<number>
   debugPortMax: Volatile<number>
   viewportWidth: Volatile<number>
@@ -185,6 +213,7 @@ export function plainConfig(config: BrowserConfigInput): BrowserConfig {
     executablePath: config.executablePath.get(),
     headless: config.headless.get(),
     userDataDir: config.userDataDir.get(),
+    profileMode: config.profileMode.get(),
     debugPortMin: config.debugPortMin.get(),
     debugPortMax: config.debugPortMax.get(),
     viewportWidth: config.viewportWidth.get(),
@@ -211,6 +240,7 @@ export const Config = z.object({
   executablePath: z.string().default('').volatile(),
   headless: z.boolean().default(true).volatile(),
   userDataDir: z.string().default('').volatile(),
+  profileMode: z.union([z.const('temp'), z.const('session'), z.const('workspace')]).default('session').volatile(),
   debugPortMin: z.natural().min(1).max(65535).default(9038).volatile(),
   debugPortMax: z.natural().min(1).max(65535).default(9237).volatile(),
   viewportWidth: z.natural().default(1440).volatile(),

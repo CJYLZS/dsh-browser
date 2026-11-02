@@ -12,8 +12,15 @@
  * (`encodeSegment` in `session-persistence-jsonl`): safe characters pass
  * through, everything else becomes `~XXXX`, which is reversible and therefore
  * cannot merge two ids into one directory.
+ *
+ * A workspace-mode profile is the same directory shape one unit coarser: one
+ * directory per workspace instead of per session, so every conversation in a
+ * project opens the same sign-ins. The prefix is not decoration — it keeps a
+ * workspace id from ever naming the same directory as a session id, which is
+ * the difference between "shared on purpose" and "shared by accident".
  */
 import { join } from 'node:path'
+import type { ProfileMode } from '../config.ts'
 
 /**
  * Longest encoded segment kept verbatim.
@@ -61,6 +68,62 @@ function hash(value: string): string {
     state = Math.imul(state ^ value.charCodeAt(index), 0x01000193) >>> 0
   }
   return state.toString(16).padStart(8, '0')
+}
+
+/**
+ * The prefix a workspace's own directory segment carries.
+ *
+ * A workspace id and a session id are both opaque harness ids, and they are
+ * drawn from different generators: nothing stops `workspace-<x>` and a session
+ * called `workspace-<x>` from colliding if the two ever shared a parent. The
+ * prefix makes the two namespaces disjoint by construction, so "these two
+ * conversations share a profile" is always the mode's doing.
+ */
+const WORKSPACE_PREFIX = 'workspace-'
+
+/**
+ * The profile directory one workspace's browser opens.
+ *
+ * Every session in the workspace resolves to this one directory, which is the
+ * whole point of the mode: a site signed into in one conversation is signed in
+ * for the next one. It is also why only one browser may open it — a second
+ * launch on a directory another process holds is handed off and Playwright
+ * refuses it — so the pool keys browsers by this directory's unit rather than
+ * by session.
+ * @param base - the configured parent directory.
+ * @param workspaceId - the workspace sharing the browser.
+ * @returns the directory every session of that workspace opens.
+ * @throws {Error} when the id is empty.
+ */
+export function workspaceProfileDirFor(base: string, workspaceId: string): string {
+  return join(base, WORKSPACE_PREFIX + encodeSessionSegment(workspaceId))
+}
+
+/**
+ * The profile directory one session's browser opens, whatever the mode.
+ *
+ * The one place the mode becomes a path, so the three modes cannot disagree
+ * about where a browser's profile lives.
+ * @param options - the mode, the configured parent, and the ids that name it.
+ * @returns the directory, which the caller creates by launching into it.
+ * @throws {Error} when the mode needs an id it was not given.
+ */
+export function profileDirOf(options: {
+  readonly mode: ProfileMode
+  readonly base: string
+  readonly sessionId: string
+  readonly workspaceId?: string
+}): string {
+  if (options.mode === 'workspace') {
+    const workspaceId = options.workspaceId
+    if (workspaceId === undefined || workspaceId === '') {
+      throw new Error(
+        'dsh-browser: the workspace profile mode needs a workspace id, and this session resolved to none',
+      )
+    }
+    return workspaceProfileDirFor(options.base, workspaceId)
+  }
+  return profileDirFor(options.base, options.sessionId)
 }
 
 /**

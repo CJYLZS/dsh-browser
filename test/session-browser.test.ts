@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { plainConfig, Config, type BrowserConfig } from '../src/config.ts'
-import { PortAllocator, portWindow } from '../src/browser/ports.ts'
+import { BrowserPool } from '../src/browser/pool.ts'
 import { SessionBrowser } from '../src/browser/session-browser.ts'
 import { formatPageInfo } from '../src/browser/page-info.ts'
 import { fakeLauncher, HEADFUL_UA, type FakeLaunch, type FakePage } from './support/browser.ts'
@@ -105,18 +105,24 @@ interface Harness {
 
 /**
  * Build a session browser with a page that answers snapshot, quads, and metrics.
+ *
+ * Built through the pool rather than directly, because the pool is what resolves
+ * a session to the process serving it — under `workspace` mode that is another
+ * session's process, and a test that constructed the view itself could never
+ * exercise that.
  * @param config - overrides on top of the schema defaults.
  * @returns the browser and its fakes.
  */
 function harness(config: Partial<BrowserConfig> = {}): Harness {
   const launch = fakeLauncher()
   const logger = { info: () => {}, warn: () => {} } as unknown as Context['logger']
-  const browser = new SessionBrowser('session-a', {
-    config: plainConfig(Config(config)),
-    ports: new PortAllocator(portWindow(9333, 9340), [], async () => true),
-    launch: launch.launch,
+  const pool = new BrowserPool(
+    plainConfig(Config(config)),
     logger,
-  })
+    launch.launch,
+    async () => true,
+  )
+  const browser = pool.get('session-a')
   const page = launch.browsers.length === 0
     ? (undefined as unknown as FakePage)
     : (launch.browsers[0]?.pages[0] as FakePage)

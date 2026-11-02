@@ -58,7 +58,10 @@ test('every field is placed once, so no control is rendered twice or dropped', (
 })
 
 test('only the fields a browser needs to work are outside the fold', () => {
-  assert.deepEqual(visiblePlacements().map(placement => placement.field), ['headless', 'channel', 'userDataDir'])
+  assert.deepEqual(
+    visiblePlacements().map(placement => placement.field),
+    ['headless', 'channel', 'profileMode', 'userDataDir'],
+  )
   const folded = foldedPlacements().map(placement => placement.field).sort()
   assert.deepEqual(folded, ['debugPortMax', 'debugPortMin', 'executablePath', 'quality', 'snapshotAttributes', 'snapshotIgnore', 'stealth', 'viewportHeight', 'viewportWidth'])
 })
@@ -79,7 +82,10 @@ test('every folded block has a heading and is not empty', () => {
 test('placementsIn returns one block in table order', () => {
   const process = placementsIn('process')
   assert.deepEqual(process.map(placement => placement.field), ['stealth', 'executablePath', 'debugPortMin', 'debugPortMax'])
-  assert.deepEqual(placementsIn('everyday').map(placement => placement.field), ['headless', 'channel', 'userDataDir'])
+  assert.deepEqual(
+    placementsIn('everyday').map(placement => placement.field),
+    ['headless', 'channel', 'profileMode', 'userDataDir'],
+  )
 })
 
 test('every labelled row has copy in both shipped languages', () => {

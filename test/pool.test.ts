@@ -191,10 +191,13 @@ test('the status report says what is running and what the limit is', async () =>
 
 test('the pool status read carries every browser fresh tab list', async () => {
   const { pool, launch } = poolWith()
-  await pool.get('session-a').ensure()
-  const opened = launch.browsers[0]?.openPage('https://example.test/new')
-  assert.ok(opened !== undefined)
-  await new Promise(resolve => { setImmediate(resolve) })
+  const browser = pool.get('session-a')
+  await browser.ensure()
+  // A page this conversation opens is its own, so it is in its tab list; a page
+  // the browser opens on its own belongs to nobody and appears in no list.
+  const opened = await browser.openPage({ url: 'https://example.test/new' })
+  assert.ok(opened?.targetId !== undefined)
+  assert.equal(launch.browsers.length, 1)
   launch.browsers[0]?.browserCdp.answers.set('Target.getTargets', () => ({
     targetInfos: [
       { targetId: 'target-0', type: 'page', url: 'about:blank', title: 'Renamed blank' },

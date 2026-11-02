@@ -33,6 +33,13 @@ export interface ClientBrowserStatus {
   /** The session this browser belongs to. */
   readonly sessionId: string
   /**
+   * Which browser process serves this session.
+   *
+   * Two rows reporting the same id are two conversations on one process — the
+   * `workspace` profile mode — and share one profile and one CDP port.
+   */
+  readonly browserId?: string | undefined
+  /**
    * The session's title, when the host could read one.
    *
    * A session id is not a name: every id starts with `session-` and the rest is
@@ -47,8 +54,10 @@ export interface ClientBrowserStatus {
   readonly mode?: string | undefined
   /** Address the active page is on. */
   readonly url?: string | undefined
-  /** Open pages, in the browser's own order. */
+  /** Open pages this session owns, in the browser's own order. */
   readonly tabs?: readonly ClientTab[] | undefined
+  /** How many pages this session owns. */
+  readonly ownedPages?: number | undefined
   /** Why the browser is unusable, when it is. */
   readonly error?: string | undefined
 }

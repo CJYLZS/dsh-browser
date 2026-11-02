@@ -19,6 +19,7 @@ test('an empty configuration resolves to the documented defaults', () => {
     executablePath: '',
     headless: true,
     userDataDir: '',
+    profileMode: 'session',
     debugPortMin: 9038,
     debugPortMax: 9237,
     viewportWidth: 1440,

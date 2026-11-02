@@ -1,25 +1,43 @@
 /**
- * One session's browser: its process, its profile, its pages, its viewers.
+ * One conversation's view of the browser it drives.
  *
- * Every conversation that uses the browser gets one of these, and nothing it
- * does is visible to another session — a link opened in one conversation does
- * not appear in the next one's tabs, and neither does a login. The cost is the
- * one a browser charges for it: profiles are per session, so a site signed into
- * in one conversation starts signed out in another.
+ * A conversation's tools, and the pane the user watches it through, address the
+ * browser belonging to that conversation's session. What "belonging" means
+ * depends on the profile mode: `session` and `temp` give each conversation a
+ * process of its own, while `workspace` gives every conversation of one project
+ * the same process — because the point of that mode is a sign-in shared across
+ * a project's conversations.
  *
- * Launch is lazy and single-flight: the first viewer or tool call starts the
- * process, and concurrent callers join the same start. Frame production follows
- * the viewer count — `Page.startScreencast` is repaint-driven and costs the
- * renderer every frame, so a mirror nobody watches keeps the browser alive but
- * stops streaming.
+ * So this class is the *conversation* half of a browser, and
+ * [`SharedBrowser`](./shared-browser.ts) is the process half. What is here is
+ * everything that is true of one conversation:
+ *
+ * - the page its tools act on (`this.page`), which is why two conversations on
+ *   one browser cannot steal each other's active page;
+ * - the refs its snapshots handed out (`this.labels`), because a ref belongs to
+ *   the document one conversation read;
+ * - its viewport cache, and the dialogs it is waiting on;
+ * - the pages it created (`ownedTargets`), which are the only ones its tab list
+ *   shows and the only ones its tools may name.
+ *
+ * Everything else — the context, the port, the profile, the page registry, the
+ * mirrors, the lifecycle — is the host's, and is read through the accessors
+ * below. The ones that look like plain fields are deliberate: the logic in this
+ * file is long and measured, and rewriting it around a different shape would
+ * spend the measurement to buy nothing.
+ *
+ * Launch is lazy and single-flight per process: the first viewer or tool call
+ * starts it, and concurrent callers join the same start. Frame production
+ * follows the viewer count — `Page.startScreencast` is repaint-driven and costs
+ * the renderer every frame, so a mirror nobody watches keeps the browser alive
+ * but stops streaming.
  */
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import type { BrowserContext, CDPSession, Dialog, Page } from 'playwright-core'
+import type { CDPSession, Dialog, Page } from 'playwright-core'
 import type { BrowserConfig } from '../config.ts'
 import { listOf } from '../config.ts'
-import type { BrowserSession, LaunchConfig } from './launch.ts'
+import type { BrowserSession } from './launch.ts'
+import { SharedBrowser, START_MIRROR_MS, until, type BrowserState, type Logger, type PageMirror, type SessionParticipant } from './shared-browser.ts'
+
 import {
   focusedInTree,
   formatAxTree,
@@ -36,8 +54,6 @@ import {
 } from './aria.ts'
 import { mergeFrameTrees, type FrameTree } from './frame-trees.ts'
 import { pageInfoFromMetrics, type PageInfo } from './page-info.ts'
-import { PortAllocator } from './ports.ts'
-import { profileDirFor } from './profile.ts'
 import {
   entryInTree,
   locateAmbiguousError,
@@ -49,9 +65,6 @@ import {
 } from './locate.ts'
 import { startScreencast, type MirrorFrame } from './screencast.ts'
 import { dispatchInput, scaleToViewport, type InputMessage, type MouseButton } from './input.ts'
-
-/** Lifecycle of one session's browser as its viewers and tools see it. */
-export type BrowserState = 'idle' | 'starting' | 'ready' | 'failed' | 'closed'
 
 /** One page the browser holds open, as a tool or a viewer describes it. */
 export interface TabSummary {
@@ -76,6 +89,14 @@ export interface TabSummary {
 export interface BrowserStatus {
   /** The session this browser belongs to. */
   readonly sessionId: string
+  /**
+   * Which browser process serves this session.
+   *
+   * Several sessions share one when the profile mode is `workspace`; the id is
+   * the pool key, so two rows that report the same one are two conversations on
+   * one process and one CDP port.
+   */
+  readonly browserId: string
   readonly state: BrowserState
   /** External CDP port once the browser runs, else `undefined`. */
   readonly debugPort: number | undefined
@@ -89,8 +110,16 @@ export interface BrowserStatus {
    * so a pending restart never reports the mode of a browser that is not up.
    */
   readonly mode: string | undefined
-  /** Open pages, in the browser's own order. */
+  /** Open pages this session owns, in the browser's own order. */
   readonly tabs: readonly TabSummary[]
+  /**
+   * How many pages this session owns.
+   *
+   * The tab list is this same set; the count is here because the settings page
+   * shows it as a number, and counting a list it already has is the kind of
+   * arithmetic a report should not make its reader repeat.
+   */
+  readonly ownedPages: number
   /** Why the browser is unusable, when it is. */
   readonly error: string | undefined
 }
@@ -98,44 +127,16 @@ export interface BrowserStatus {
 /** Receives every mirrored frame while subscribed. */
 export type FrameListener = (frame: MirrorFrame) => void
 
-/** One page's mirror: the session it is watched on, its stream, its viewers. */
-interface PageMirror {
-  /** The CDP session this mirror attached itself — never `adopt`'s own. */
-  cdp: CDPSession
-  /** Stops the screen cast. */
-  stop: () => Promise<void>
-  /** Everyone watching this page; frames go to each of them. */
-  readonly viewers: Set<FrameListener>
-}
-
-/** Starts a browser; the seam that keeps this class testable without one. */
-export type Launcher = (config: LaunchConfig, userDataDir: string) => Promise<BrowserSession>
-
-/** The logging this class needs, satisfied by a cordis logger. */
-export interface Logger {
-  /** Record something that happened. */
-  info(message: string): void
-  /** Record something that went wrong. */
-  warn(error: Error): void
-}
-
-/** What a session browser is built from. */
+/** What a conversation's browser is built from. */
 export interface SessionBrowserDeps {
-  /** Configuration the browser launches with. */
-  readonly config: BrowserConfig
-  /** Owner of the CDP port this browser listens on. */
-  readonly ports: PortAllocator
-  /** Starts the process. */
-  readonly launch: Launcher
+  /** The process this conversation drives, shared or private. */
+  readonly host: SharedBrowser
   /** Where launch outcomes are reported. */
   readonly logger: Logger
 }
 
 /** How long a measured viewport is trusted before it is read again, in milliseconds. */
 const VIEWPORT_TTL_MS = 1_000
-
-/** What a browser that vanished without being asked to is reported as. */
-const DIED_REASON = 'the browser was closed or crashed'
 
 /**
  * How long a page must stay still before an action is called settled.
@@ -183,15 +184,6 @@ const SETTLE_MAX_MS = 3_000
  * only holds up the call that has already given up.
  */
 const INTERRUPT_QUIET_MS = 1_000
-
-/**
- * How long the mirror is given to attach before the browser is reported ready.
- *
- * The mirror is a view of the browser, not the browser: a page that will not
- * answer `Page.startScreencast` — a wedged renderer — must not hold up every
- * later call, because a start in flight is a start every caller joins.
- */
-const START_MIRROR_MS = 5_000
 
 /** Why a browser that did not answer a cancelled call is dropped. */
 const UNREACHABLE_REASON = 'the browser did not answer after the call that was cancelled'
@@ -1604,39 +1596,6 @@ function asyncBody(expression: string): string {
   return `(async () => {\n${expression}\n})()`
 }
 
-/** What waiting for one promise until a deadline produced. */
-interface Until<T> {
-  /** Whether it settled — either way — before the deadline. */
-  readonly settled: boolean
-  /** What it produced, when it produced one. */
-  readonly value?: T
-}
-
-/**
- * Wait for a promise, but only until a deadline.
- *
- * For the work this class can afford to give up on: a page being told to stop,
- * a mirror being attached. A rejection counts as settled — a browser that
- * refused is a browser that answered — and the abandoned promise's failure is
- * swallowed here rather than surfacing as an unhandled rejection.
- * @param work - the promise to wait for.
- * @param ms - how long it is given.
- * @returns whether it settled in time, and what it produced.
- */
-async function until<T>(work: Promise<T>, ms: number): Promise<Until<T>> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      work.then(value => ({ settled: true, value }), () => ({ settled: true })),
-      new Promise<Until<T>>(done => {
-        timer = setTimeout(() => { done({ settled: false }) }, ms)
-      }),
-    ])
-  } finally {
-    if (timer !== undefined) clearTimeout(timer)
-  }
-}
-
 /**
  * The box a content quad describes.
  *
@@ -1765,73 +1724,55 @@ async function hideHeadlessUserAgent(cdp: CDPSession, page: Page): Promise<void>
 }
 
 /**
- * One session's browser, from its first use to its disposal.
+ * One conversation's browser, from its first use to its disposal.
+ *
+ * Several of these may point at one process; see the module comment for the
+ * split. Everything reached through {@link host} is the process's, and
+ * everything held here is this conversation's.
  */
-export class SessionBrowser {
-  /** Pages the browser holds open, for the tab list a tool result carries. */
+export class SessionBrowser implements SessionParticipant {
+  /** Pages watching this conversation's active page. */
   private readonly viewers = new Set<FrameListener>()
   private readonly watchers = new Set<(status: BrowserStatus) => void>()
-  private readonly sessionId: string
-  private readonly ports: PortAllocator
-  private readonly launch: Launcher
+  /** This conversation's session id. */
+  readonly sessionId: string
   private readonly logger: Logger
-  private config: BrowserConfig
-  private state: BrowserState = 'idle'
-  private reason: string | undefined
-  private session: BrowserSession | undefined
+  /**
+   * The process serving this conversation, shared or private.
+   *
+   * Deliberately reachable from the pool and the tools, which need the process
+   * half to key browsers by it rather than by session.
+   */
+  readonly host: SharedBrowser
+  /** The page this conversation's tools and un-named mirror act on. */
   private page: Page | undefined
+  /** The CDP session attached to {@link page}. */
   private cdp: CDPSession | undefined
-  private port: number | undefined
-  private temporaryProfile: string | undefined
-  private launchedHeadless: boolean | undefined
-  private starting: Promise<void> | undefined
   private stream: (() => Promise<void>) | undefined
-  /** The browser-level CDP session `Target.getTargets` is asked on, kept for the browser's life. */
-  private browserCdp: CDPSession | undefined
   /**
    * The CSS viewport each page reported last, keyed by how it is driven: a
    * target id for a named page, `active` for the un-named one.
    *
    * Cached so a pointer move is not a round trip; a navigation replaces the
    * document and the viewport with it, and an adoption replaces which page
-   * `active` means.
+   * `active` means. It is this conversation's cache: two conversations on one
+   * page need not share it, and a page this conversation never measured has no
+   * entry to invalidate.
    */
   private readonly viewports = new Map<string, { at: number; size: { width: number; height: number } }>()
   /**
-   * Labels this page has handed out, by ref.
+   * Labels this conversation's snapshots have handed out, by ref.
    *
    * It belongs to the page rather than to a snapshot: a ref taken before a menu
    * opened still names the element it named then, and re-printing the page does
    * not renumber the ones already handed out. A page that goes away takes its
    * labels with it, because a backend node id means nothing on another page.
+   *
+   * A registry per conversation, rather than one per browser: two conversations
+   * on one browser read the same page with their own refs, and a shared registry
+   * would have the second snapshot silently renumber the first one's `e1`.
    */
   private labels = new RefLabels()
-  /** Set while this class itself is closing the browser, so it is not a death. */
-  private closing = false
-  /**
-   * Set while the user has stopped this browser and nothing has asked for one
-   * since.
-   *
-   * A browser that died is one the next request should bring back; a browser the
-   * user closed is not. A viewer is not a request: re-subscribing to the pane —
-   * a Sidebar tab switched away and back, the column hidden and shown, a reloaded
-   * client — used to start a fresh `about:blank` over the close the user had just
-   * asked for. Everything else that reaches {@link ensure} is asking for a
-   * browser and clears this.
-   */
-  private userClosed = false
-  /**
-   * Pages this browser holds, by their CDP target id.
-   *
-   * The target id is the page's stable identity — external DevTools sees the
-   * same one — and it is what the sidebar's tabs name, so a tab keeps pointing
-   * at its page across navigations and active-page changes. Filled when a page
-   * is adopted (one `Target.getTargetInfo` on the page's own session), dropped
-   * when the page goes.
-   */
-  private readonly pageIds = new Map<Page, string>()
-  /** What each page last said its title was, by target id. */
-  private readonly titles = new Map<string, string>()
   /**
    * The page a viewer's ask for a new page already produced, by the asking
    * record's id.
@@ -1842,17 +1783,7 @@ export class SessionBrowser {
    * target id, so a page that is gone makes the next ask an open again.
    */
   private readonly openRequests = new Map<string, string>()
-  /**
-   * One mirror per page someone is watching, by target id.
-   *
-   * A viewer names the page it wants, so two panes on two pages run two screen
-   * casts, and the page the tools act on has nothing to do with what a pane
-   * shows. Each mirror owns the CDP session it watches on — never the one
-   * `adopt()` attaches for the active page — because that session is the one a
-   * later adoption detaches.
-   */
-  private readonly mirrors = new Map<string, PageMirror>()
-  /** How many settle probes this browser has armed, for a slot no two share. */
+  /** How many settle probes this conversation has armed, for a slot no two share. */
   private settleSeq = 0
   /**
    * Dialogs answered since a tool last read them.
@@ -1885,66 +1816,160 @@ export class SessionBrowser {
    * default, which is to dismiss it.
    */
   private readonly policies: DialogPolicy[] = []
+  /** The adoption running right now, if one is; resolved when none is. */
+  private adoption: Promise<void> = Promise.resolve()
+  /** The page that adoption is for; cleared when the browser lets its pages go. */
+  private adoptingPage: Page | undefined
 
   /**
-   * @param sessionId - the session this browser belongs to.
-   * @param deps - configuration, port owner, launcher, and logger.
+   * @param sessionId - the conversation this view serves.
+   * @param deps - the process it drives, and where outcomes are reported.
    */
   constructor(sessionId: string, deps: SessionBrowserDeps) {
     this.sessionId = sessionId
-    this.config = deps.config
-    this.ports = deps.ports
-    this.launch = deps.launch
+    this.host = deps.host
     this.logger = deps.logger
+    this.host.join(this)
+  }
+
+  // ---- The process half, as this conversation reads it -------------------
+  //
+  // These are the fields whose owner moved to `SharedBrowser`. They stay spelled
+  // as fields because the logic below is long and measured, and rewriting it
+  // around a different shape would spend the measurements to buy nothing.
+
+  /** The browser's context, once one is running. */
+  private get session(): BrowserSession | undefined {
+    return this.host.session
+  }
+
+  private set session(next: BrowserSession | undefined) {
+    this.host.session = next
+  }
+
+  /** The lifecycle state, which every conversation on this browser shares. */
+  private get state(): BrowserState {
+    return this.host.state
+  }
+
+  private get reason(): string | undefined {
+    return this.host.reason
+  }
+
+  private set reason(next: string | undefined) {
+    this.host.reason = next
+  }
+
+  /** The external CDP port the running browser listens on. */
+  private get port(): number | undefined {
+    return this.host.port
+  }
+
+  /** Whether the running browser has a window. */
+  private get launchedHeadless(): boolean | undefined {
+    return this.host.launchedHeadless
+  }
+
+  /**
+   * Set while the user has stopped this browser and nothing has asked for one
+   * since. A viewer is not a request, so the pane checks this before subscribing.
+   */
+  private get userClosed(): boolean {
+    return this.host.userClosed
+  }
+
+  private set userClosed(next: boolean) {
+    this.host.userClosed = next
+  }
+
+  /** Pages the browser holds, by their CDP target id. */
+  private get pageIds(): Map<Page, string> {
+    return this.host.pageIds
+  }
+
+  /** What each page last said its title was, by target id. */
+  private get titles(): Map<string, string> {
+    return this.host.titles
+  }
+
+  /** One mirror per page someone is watching, by target id. */
+  private get mirrors(): Map<string, PageMirror> {
+    return this.host.mirrors
+  }
+
+  /** The configuration in force for the browser serving this conversation. */
+  private get config(): BrowserConfig {
+    return this.host.activeConfig
   }
 
   /**
    * Adopt a new configuration.
    *
-   * A field the running browser was launched from closes it: viewers keep their
-   * subscription, and the next frame request starts a browser built from the
-   * new values. Frames are restarted in place, since only the stream's own
-   * encoding changed.
+   * The process decides whether anything it was launched from changed, and
+   * closes if so; this side then re-attaches the mirrors, because an encoding
+   * change is a stream's own and every subscribed pane has to be re-attached.
    * @param next - the newly resolved configuration.
    * @returns after the browser has been restarted, when it had to be.
    */
   async reconfigure(next: BrowserConfig): Promise<void> {
     const previous = this.config
-    this.config = next
-    if (this.state !== 'ready' && this.state !== 'starting') return
-    if (!sameLaunch(previous, next)) {
-      this.logger.info('dsh-browser: launch configuration changed; restarting the browser')
-      await this.close()
+    const restarting = await this.host.reconfigure(next)
+    if (restarting) {
       await this.openStreamForViewers()
       return
     }
-    if (!sameEncoding(previous, next) && this.viewers.size > 0) {
+    await this.restartStreams(next, previous)
+  }
+
+  /**
+   * Re-attach this conversation's mirrors after an encoding change.
+   *
+   * Separate from {@link reconfigure} because a shared browser is reconfigured
+   * once by whichever conversation asks first, while every conversation on it has
+   * its own streams to restart. The encoding that changed is the configuration's,
+   * so the caller passes the pair it knows about.
+   * @param next - the new configuration.
+   * @param previous - what the streams were running with.
+   * @returns after the streams have been restarted.
+   */
+  async reconfigureMirrors(next: BrowserConfig, previous: BrowserConfig): Promise<void> {
+    await this.restartStreams(next, previous)
+  }
+
+  /** The encoding half of a reconfiguration, for one conversation's streams. */
+  private async restartStreams(next: BrowserConfig, previous: BrowserConfig): Promise<void> {
+    if (this.state !== 'ready' && this.state !== 'starting') return
+    if (sameEncoding(previous, next)) return
+    if (this.viewers.size > 0) {
       await this.closeStream()
       await this.openStream()
     }
-    if (!sameEncoding(previous, next)) {
-      // A named mirror keeps its own stream; an encoding change is its to
-      // apply too, and a page that went away while it held a stream is dropped.
-      for (const [targetId, mirror] of [...this.mirrors]) {
-        if (mirror.viewers.size === 0) continue
-        await this.attachMirrorStream(targetId, mirror).catch((error: unknown) => {
-          this.logger.warn(error instanceof Error ? error : new Error(String(error)))
-          this.dropMirror(targetId)
-        })
-      }
+    // A named mirror keeps its own stream; an encoding change is its to apply
+    // too, and a page that went away while it held a stream is dropped.
+    for (const [targetId, mirror] of [...this.mirrors]) {
+      if (mirror.viewers.size === 0) continue
+      if (!this.host.owns(this.sessionId, targetId)) continue
+      await this.attachMirrorStream(targetId, mirror).catch((error: unknown) => {
+        this.logger.warn(error instanceof Error ? error : new Error(String(error)))
+        this.dropMirror(targetId)
+      })
     }
   }
+
 
   /**
    * The current status snapshot.
    *
-   * The tab list is the pages this browser can name and no others — the same
+   * The tab list is the pages this conversation owns and no others — the same
    * list the Sidebar's tabs are built from, and the same one a tool result
-   * carries, so what the user sees and what the model is told are one list.
+   * carries, so what the user sees and what the model is told are one list. On a
+   * shared browser that is the whole of what keeps one conversation's pages out
+   * of another's view; the process is common, the tab list is not.
    */
   status(): BrowserStatus {
     return {
       sessionId: this.sessionId,
+      browserId: this.host.key,
       state: this.state,
       debugPort: this.port,
       version: this.session?.version,
@@ -1953,6 +1978,7 @@ export class SessionBrowser {
         ? undefined
         : this.launchedHeadless ? 'headless' : 'headful',
       tabs: this.namedPages(),
+      ownedPages: this.host.ownedBy(this.sessionId).length,
       error: this.reason,
     }
   }
@@ -1986,17 +2012,18 @@ export class SessionBrowser {
   }
 
   /**
-   * The pages this browser can name, in its own page order.
+   * The pages this conversation owns, in the browser's own page order.
    *
-   * A page whose target id is not known yet is left out: a Sidebar tab is
-   * addressed by that id, so a page without one is a page no tab can open, and
-   * listing it would promise one that cannot exist. The position an entry
-   * carries is the page's place in the browser's whole list, which is what the
-   * browser's own tab order means.
-   * @returns one entry per nameable page.
+   * Ownership is what makes a shared browser usable: two conversations hold
+   * different pages of one process, and each one's tab list is the pages it
+   * created. A page whose target id is not known yet is left out, because a
+   * Sidebar tab is addressed by that id, so a page without one is a page no tab
+   * can open. The position an entry carries is the page's place in the browser's
+   * whole list, which is what the browser's own tab order means.
+   * @returns one entry per nameable page this conversation owns.
    */
   private namedPages(): TabSummary[] {
-    const pages = this.session?.context.pages() ?? []
+    const pages = this.host.pages()
     const named: TabSummary[] = []
     for (const [index, page] of pages.entries()) {
       const tab = this.summaryOf(page, index)
@@ -2006,14 +2033,18 @@ export class SessionBrowser {
   }
 
   /**
-   * One page as the tab list describes it.
+   * One page as this conversation's tab list describes it.
    * @param page - the page.
    * @param index - its place in the browser's whole page list.
-   * @returns the entry, or `undefined` for a page the browser has not named.
+   * @returns the entry, or `undefined` for a page this conversation does not own.
    */
   private summaryOf(page: Page, index: number): TabSummary | undefined {
     const targetId = this.pageIds.get(page)
     if (targetId === undefined) return undefined
+    // A page another conversation opened is not this one's to list, name, or
+    // act on. That is the whole visible difference between a shared browser and
+    // a private one, as far as a conversation can tell.
+    if (!this.host.owns(this.sessionId, targetId)) return undefined
     return {
       index,
       url: page.url(),
@@ -2026,10 +2057,10 @@ export class SessionBrowser {
   /**
    * One page's entry, positioned by the browser's own list.
    * @param page - the page, which the browser must hold.
-   * @returns the entry, or `undefined` for a page the browser has not named.
+   * @returns the entry, or `undefined` for a page this conversation does not own.
    */
   private summaryOfPage(page: Page): TabSummary | undefined {
-    return this.summaryOf(page, (this.session?.context.pages() ?? []).indexOf(page))
+    return this.summaryOf(page, this.host.pages().indexOf(page))
   }
 
   /**
@@ -2037,27 +2068,7 @@ export class SessionBrowser {
    * @returns titles by target id; empty when the list cannot be asked.
    */
   private async targetTitles(): Promise<Map<string, string>> {
-    const browser = this.session?.context.browser()
-    if (browser === null || browser === undefined) return new Map()
-    try {
-      if (this.browserCdp === undefined) this.browserCdp = await browser.newBrowserCDPSession()
-      const answer = await until(this.browserCdp.send('Target.getTargets'), TARGET_TITLES_MS) as {
-        settled: boolean
-        value?: { targetInfos?: { targetId?: unknown; type?: unknown; title?: unknown }[] }
-      }
-      const titles = new Map<string, string>()
-      if (!answer.settled) return titles
-      for (const info of answer.value?.targetInfos ?? []) {
-        if (info.type !== 'page') continue
-        if (typeof info.targetId === 'string' && typeof info.title === 'string') {
-          titles.set(info.targetId, info.title)
-        }
-      }
-      return titles
-    } catch {
-      // A browser that refuses the list is one the memory answers for.
-      return new Map()
-    }
+    return await this.host.targetTitles(TARGET_TITLES_MS)
   }
 
   /**
@@ -2079,27 +2090,59 @@ export class SessionBrowser {
    * Start the browser if it is not running, joining an in-flight start.
    *
    * A browser that died or failed is started again here, which is what makes
-   * any later request — a tool call, a viewer reconnecting, the pane's restart
-   * — recover without reloading the plugin.
+   * any later request — a tool call, a viewer reconnecting, the pane's restart —
+   * recover without reloading the plugin.
    * @returns after the browser is ready.
-   * @throws {Error} when the browser cannot start.
+   * @throws {Error} when the browser cannot start, including when the profile
+   * mode needs a workspace and this deployment cannot resolve one.
    */
   async ensure(): Promise<void> {
-    // Everything that gets here — a tool, a restart, a configuration change —
-    // is asking for a browser, so a close the user made earlier no longer
-    // stands. The one path that is not a request checks the flag itself.
-    this.userClosed = false
-    if (this.state === 'ready') return
-    if (this.starting !== undefined) {
-      await this.starting
+    const wasReady = this.host.state === 'ready'
+    await this.host.ensure(this.host.profileDir)
+    await this.adoptIfUnset()
+    // A viewer that stayed subscribed while the browser was being replaced is
+    // still watching, and the screen cast died with the old process: it belongs
+    // to the CDP session that went away. Nothing else re-attaches it — a viewer
+    // only starts one when it arrives — so a pane that was open across a restart
+    // or a crash would sit on its last frame forever.
+    if (!wasReady && this.host.state === 'ready' && this.viewers.size > 0) {
+      const mirror = await until(this.openStream(), START_MIRROR_MS)
+      if (!mirror.settled) {
+        this.logger.warn(new Error(
+          `dsh-browser: session ${this.sessionId}'s page did not answer the mirror request; `
+          + 'the browser is ready without it',
+        ))
+      }
+    }
+  }
+
+  /**
+   * Give this conversation an active page when it has none.
+   *
+   * A conversation that joins a browser another one started has no page of its
+   * own: the page the browser came up on belongs to whoever asked for it. It
+   * gets a page the first time it asks to do something, which is also the first
+   * moment the page can be attributed to it.
+   */
+  private async adoptIfUnset(): Promise<void> {
+    if (this.page !== undefined) return
+    const running = this.host.pages()
+    const mine = running.find(page => {
+      const targetId = this.pageIds.get(page)
+      return targetId !== undefined && this.host.owns(this.sessionId, targetId)
+    })
+    if (mine !== undefined) {
+      await this.adopt(mine)
       return
     }
-    this.starting = this.start()
-    try {
-      await this.starting
-    } finally {
-      this.starting = undefined
-    }
+    // Nobody has a claim on the page the browser started with — not even the
+    // conversation that started it, which claims it in `start`. Taking it here is
+    // what makes the first conversation to ask work on a page that exists.
+    const unclaimed = running.find(page => {
+      const targetId = this.pageIds.get(page)
+      return targetId === undefined || this.host.ownerOf(targetId) === undefined
+    })
+    if (unclaimed !== undefined) await this.adopt(unclaimed)
   }
 
   /**
@@ -2125,7 +2168,9 @@ export class SessionBrowser {
     this.logger.warn(new Error(
       `dsh-browser: session ${this.sessionId}'s browser did not answer after a cancelled call; dropping it`,
     ))
-    this.forget()
+    // The browser is the shared thing, so a wedged process is dropped for every
+    // conversation on it rather than left behind as a trap for the next one.
+    await this.host.close()
     this.reason = UNREACHABLE_REASON
     this.setState('closed')
   }
@@ -2238,14 +2283,22 @@ export class SessionBrowser {
     void mirror.stop().catch(() => {})
   }
 
-  /** The page that answers to a CDP target id, if the browser still holds it. */
+  /**
+   * The page that answers to a CDP target id, if this conversation owns it.
+   *
+   * Ownership is enforced here rather than at each caller: on a shared browser a
+   * target id is only unique inside the process, so every path that turns an id
+   * into a page — a tool's `targetId`, a pane's page address, a close — has to
+   * ask the same question. A page another conversation opened is a page this one
+   * cannot see, name, or act on.
+   * @param targetId - the page's CDP target id.
+   * @returns the page, or `undefined` when this conversation does not own it.
+   */
   private pageByTargetId(targetId: string): Page | undefined {
-    const context = this.session?.context
-    if (context === undefined) return undefined
-    for (const page of context.pages()) {
-      if (this.pageIds.get(page) === targetId) return page
-    }
-    return undefined
+    const page = this.host.pageById(targetId)
+    if (page === undefined) return undefined
+    if (!this.host.owns(this.sessionId, targetId)) return undefined
+    return page
   }
 
   /**
@@ -2412,10 +2465,15 @@ export class SessionBrowser {
     // The dialogs already in the buffer are not this call's to claim.
     this.beginCall()
     this.policies.push(policy ?? { action: 'dismiss' })
+    // A page that appears while this call runs is this conversation's: the
+    // protocol says nothing about who opened a page, so the action in flight is
+    // the whole of the attribution.
+    this.host.beginAction(this.sessionId)
     try {
       return await work()
     } finally {
       this.policies.pop()
+      this.host.endAction(this.sessionId)
     }
   }
 
@@ -2445,19 +2503,6 @@ export class SessionBrowser {
     this.invalidateViewport(page)
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 })
     this.publish()
-  }
-
-  /**
-   * Replace the browser with a freshly started one.
-   *
-   * This is what a viewer asks for when the browser it was watching is gone or
-   * unusable: the session keeps its browser slot, the process is new, and the
-   * pages of the old one are not carried over.
-   * @throws {Error} when the new browser cannot start.
-   */
-  async restart(): Promise<void> {
-    await this.close()
-    await this.ensure()
   }
 
   /**
@@ -4115,31 +4160,36 @@ export class SessionBrowser {
     this.publish()
   }
 
-  /** Stop the browser and release its port and temporary profile. */
+  /**
+   * Forget this conversation's own state: a browser it was watching is gone.
+   *
+   * The mirror and the page pointer are this side's; the process, the port, and
+   * the page registry died with the browser and are the host's to forget. What
+   * survives is the labels' numbering — deliberately, so a ref this conversation
+   * handed out before the browser died can never be mistaken for one a later
+   * snapshot of a new page hands out under the same name.
+   */
+  private forgetOwnState(): void {
+    void this.closeStream()
+    this.openRequests.clear()
+    this.adoptingPage = undefined
+    this.page = undefined
+    this.cdp = undefined
+    this.labels.forgetPage()
+  }
+
+  /**
+   * Stop this conversation's use of the browser.
+   *
+   * On a shared browser this is what "close this conversation's browser" means:
+   * its own pages go, and the process stays up for everyone else. The reference
+   * count decides whether the process itself closes, which the pool owns.
+   * @returns after this conversation has let go of the browser.
+   */
   async close(): Promise<void> {
-    this.closing = true
-    try {
-      await this.closeStream()
-      for (const targetId of [...this.mirrors.keys()]) this.dropMirror(targetId)
-      this.pageIds.clear()
-      this.titles.clear()
-      this.openRequests.clear()
-      this.adoptingPage = undefined
-      void this.browserCdp?.detach().catch(() => {})
-      this.browserCdp = undefined
-      const session = this.session
-      this.session = undefined
-      this.page = undefined
-      this.cdp = undefined
-      this.launchedHeadless = undefined
-      this.reason = undefined
-      this.setState('closed')
-      if (session !== undefined) await session.context.close().catch(() => {})
-    } finally {
-      this.closing = false
-    }
-    this.releasePort()
-    await this.removeTemporaryProfile()
+    await this.closeStream()
+    this.forgetOwnState()
+    this.setState('closed')
   }
 
   /**
@@ -4148,102 +4198,54 @@ export class SessionBrowser {
    * The pane's own close control lands here rather than on {@link close},
    * because the two differ in what happens next: this one makes the close stand
    * until something genuinely needs a browser, so a viewer that comes back finds
-   * a stopped browser instead of a fresh blank page.
+   * a stopped browser instead of a fresh blank page — and on a shared browser it
+   * stops the process for everyone on it, which is what the user asked for.
    * @returns after the browser has stopped.
    */
   async stop(): Promise<void> {
     this.userClosed = true
-    await this.close()
-  }
-
-  /** Start the browser, attach to its first page, and open the startup address. */
-  private async start(): Promise<void> {
-    this.setState('starting')
-    try {
-      this.port = await this.ports.allocate()
-      const userDataDir = this.config.userDataDir === ''
-        ? await mkdtemp(join(tmpdir(), 'dsh-browser-'))
-        : profileDirFor(this.config.userDataDir, this.sessionId)
-      if (this.config.userDataDir === '') this.temporaryProfile = userDataDir
-      const launchConfig: LaunchConfig = { ...this.config, debugPort: this.port }
-      const session = await this.launch(launchConfig, userDataDir)
-      this.session = session
-      this.launchedHeadless = this.config.headless
-      this.observe(session.context)
-      const page = session.context.pages()[0] ?? await session.context.newPage()
-      // Attached before the first request: a headless build spells its user
-      // agent `HeadlessChrome/…`, which no real install ever sends.
-      await this.adopt(page)
-      if (this.config.startupUrl !== '' && this.config.startupUrl !== 'about:blank') {
-        await page.goto(this.config.startupUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-      }
-      this.reason = undefined
-      this.setState('ready')
-      // A viewer that stayed subscribed while this browser was being replaced
-      // is still watching, and the screen cast died with the old browser: it
-      // belongs to the CDP session that just went away. Nothing else re-attaches
-      // it — a viewer only starts one when it arrives — so a pane that was open
-      // across a restart or a crash would sit on its last frame forever.
-      const mirror = await until(this.openStream(), START_MIRROR_MS)
-      if (!mirror.settled) {
-        this.logger.warn(new Error(
-          `dsh-browser: session ${this.sessionId}'s page did not answer the mirror request; `
-          + 'the browser is ready without it',
-        ))
-      }
-      this.logger.info(
-        `dsh-browser: session ${this.sessionId} is on ${page.url()}`
-        + ` — CDP on 127.0.0.1:${String(this.port)} (${session.version})`,
-      )
-    } catch (error) {
-      // Release whatever started before the failure, then keep the reason: the
-      // close path resets state, and the failure must outlive it.
-      const reason = error instanceof Error ? error.message : String(error)
-      await this.close()
-      this.reason = reason
-      this.setState('failed')
-      throw error
-    }
+    await this.host.stop()
   }
 
   /**
-   * Follow the browser's own lifecycle: a context that closes without being
-   * asked to, and pages it opens on its own.
-   *
-   * The mirror follows the newest page, which is what a person would see: a
-   * link that opens a tab puts that tab in front, and the tools act on what is
-   * in front rather than on a page that scrolled away behind it.
-   * @param context - the launched browser's context.
+   * Replace the browser with a freshly started one.
+   * @returns after the new browser is ready.
+   * @throws {Error} when the new browser cannot start.
    */
-  private observe(context: BrowserContext): void {
-    context.on('close', () => {
-      // The close this class asked for is not a death; the process is going
-      // away because the session is, and the reason belongs to nobody.
-      if (this.closing) return
-      this.logger.warn(new Error(`dsh-browser: session ${this.sessionId} lost its browser: ${DIED_REASON}`))
-      this.forget()
-      this.reason = DIED_REASON
-      this.setState('closed')
-    })
-    context.on('page', (page) => {
-      this.logger.info(`dsh-browser: session ${this.sessionId} opened a new tab`)
-      void this.adopt(page).catch((error: unknown) => {
-        this.logger.warn(error instanceof Error ? error : new Error(String(error)))
-      })
+  async restart(): Promise<void> {
+    await this.host.close()
+    await this.ensure()
+  }
+
+  /**
+   * Follow the browser's own lifecycle.
+   *
+   * Both of the events that matter — the context closing, and a page appearing —
+   * are observed by the process, which is where they happen; this class learns
+   * about them through the {@link SessionParticipant} callbacks at the bottom.
+   * The method is kept as the one place a conversation says what a page's arrival
+   * means to it, because that is the conversation's decision and not the
+   * process's.
+   * @param page - the page to offer to this conversation.
+   */
+  private offer(page: Page): void {
+    this.logger.info(`dsh-browser: session ${this.sessionId} opened a new tab`)
+    void this.adopt(page).catch((error: unknown) => {
+      this.logger.warn(error instanceof Error ? error : new Error(String(error)))
     })
   }
 
   /**
-   * Make one page the page tools and the mirror act on.
+   * Take one page of the shared browser as this conversation's own.
    *
    * A page carries its own CDP session, so following one means attaching to it
-   * and restarting the mirror from the new attachment; the old attachment is
-   * detached afterwards, once nothing is reading it.
+   * and restarting this conversation's mirror from the new attachment; the old
+   * attachment is detached afterwards, once nothing is reading it. The page is
+   * claimed here, which is what makes it appear in this conversation's tab list
+   * and in nobody else's.
    *
-   * The promise is kept on the session (`adoption`) so a report that is being
-   * written while a tab opens can wait for the world it describes to exist:
-   * measured 2026-09-29, two of three `window.open` clicks read their state
-   * before the adoption finished and described the page they left behind.
+   * A page another conversation already owns is refused by the caller rather
+   * than adopted: the process is shared, but the pages are not.
    * @param page - the page to adopt.
    * @returns when the page is the one tools and mirror act on.
    */
@@ -4258,13 +4260,7 @@ export class SessionBrowser {
     return running
   }
 
-  /** The adoption running right now, if one is; resolved when none is. */
-  private adoption: Promise<void> = Promise.resolve()
-
-  /** The page that adoption is for; cleared when the browser lets its pages go. */
-  private adoptingPage: Page | undefined
-
-  /** Do the work of `adopt`, which keeps it as the session's current adoption. */
+  /** Do the work of `adopt`, which keeps it as this conversation's adoption. */
   private async adopting(page: Page): Promise<void> {
     const previous = this.cdp
     this.page = page
@@ -4282,15 +4278,20 @@ export class SessionBrowser {
       if (frame === page.mainFrame()) this.forgetSaid()
       this.publish()
     })
-    // Every page gets this, not only the one the tools act on: a popup that
-    // asks its question is still a question the model asked for by clicking.
-    page.on('dialog', (dialog) => { this.answerDialog(dialog) })
+    // Only this conversation's own pages get the dialog listener: a dialog
+    // belongs to the conversation whose input caused it, and answering another
+    // one's would be answering a question nobody here was asked.
+    page.on('dialog', (dialog) => {
+      if (!this.ownsPage(page)) return
+      this.answerDialog(dialog)
+    })
     page.on('close', () => {
-      this.forgetPage(page)
+      const targetId = this.host.forgetPage(page)
+      this.viewports.delete(targetId ?? 'active')
       if (this.page !== page) { this.publish(); return }
       void this.moveToSurvivingPage()
     })
-    const cdp = await this.session?.context.newCDPSession(page)
+    const cdp = await this.host.cdpFor(page)
     if (cdp === undefined) return
     // `active` names a different page from here on, so what the old one
     // reported about its own size is not this page's answer.
@@ -4307,13 +4308,30 @@ export class SessionBrowser {
     this.publish()
   }
 
-  /** Move the mirror to a page that still exists after the active one closed. */
+  /** Whether a page is one this conversation owns. */
+  private ownsPage(page: Page): boolean {
+    const targetId = this.pageIds.get(page)
+    return targetId !== undefined && this.host.owns(this.sessionId, targetId)
+  }
+
+  /**
+   * Move this conversation to a page that still exists after its active one
+   * closed, or to none when it owns nothing else.
+   *
+   * On a shared browser the survivor is the conversation's own page, not
+   * whatever page the browser happens to hold: adopting somebody else's page
+   * would hand this conversation another conversation's tab.
+   */
   private async moveToSurvivingPage(): Promise<void> {
-    const context = this.session?.context
-    if (context === undefined) return
+    const own = this.host.pages().find(page => this.ownsPage(page))
+    if (own === undefined) {
+      this.page = undefined
+      this.cdp = undefined
+      this.publish()
+      return
+    }
     try {
-      const survivor = context.pages()[0] ?? await context.newPage()
-      await this.adopt(survivor)
+      await this.adopt(own)
     } catch (error) {
       this.logger.warn(error instanceof Error ? error : new Error(String(error)))
     }
@@ -4321,7 +4339,7 @@ export class SessionBrowser {
 
   /**
    * Learn a page's CDP target id — and with it the title it reported — from its
-   * own session.
+   * own session, and take it as this conversation's page.
    *
    * One call, on the session this class just attached: `Target.getTargetInfo`
    * with no argument answers the target that session is attached to, so the id
@@ -4338,22 +4356,14 @@ export class SessionBrowser {
       }
       const targetId = answer.targetInfo?.targetId
       if (typeof targetId !== 'string' || targetId === '') return
-      this.pageIds.set(page, targetId)
       const title = answer.targetInfo?.title
-      if (typeof title === 'string') this.titles.set(targetId, title)
+      this.host.remember(page, targetId, typeof title === 'string' ? title : undefined)
+      this.host.claim(this.sessionId, targetId)
       this.publish()
     } catch {
       // A refused identity call is not an adoption failure: the page works, it
       // just cannot be named yet, and the next publish carries what is known.
     }
-  }
-
-  /** Drop everything tracked about a page that is gone. */
-  private forgetPage(page: Page): void {
-    const targetId = this.pageIds.get(page)
-    this.pageIds.delete(page)
-    if (targetId !== undefined) this.titles.delete(targetId)
-    this.dropMirror(targetId)
   }
 
   /** Attach the screencast for the current viewers, starting the browser if needed. */
@@ -4400,40 +4410,6 @@ export class SessionBrowser {
     if (stop !== undefined) await stop().catch(() => {})
   }
 
-  /** Drop everything the dead browser owned, keeping the viewers subscribed. */
-  private forget(): void {
-    void this.closeStream()
-    for (const targetId of [...this.mirrors.keys()]) this.dropMirror(targetId)
-    this.pageIds.clear()
-    this.titles.clear()
-    this.openRequests.clear()
-    this.adoptingPage = undefined
-    void this.browserCdp?.detach().catch(() => {})
-    this.browserCdp = undefined
-    this.session = undefined
-    this.page = undefined
-    this.cdp = undefined
-    this.launchedHeadless = undefined
-    this.releasePort()
-    void this.removeTemporaryProfile()
-  }
-
-  /** Give the CDP port back, so a later browser may take it. */
-  private releasePort(): void {
-    if (this.port !== undefined) this.ports.release(this.port)
-    this.port = undefined
-  }
-
-  /** Remove a temporary profile; a configured one is the user's to keep. */
-  private async removeTemporaryProfile(): Promise<void> {
-    const profile = this.temporaryProfile
-    this.temporaryProfile = undefined
-    if (profile === undefined) return
-    // A profile directory can stay locked for a moment after the process
-    // exits, and a leftover directory in the OS temp area is not a failure.
-    await rm(profile, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
-  }
-
   /** The CDP session, or a failure naming the browser state. */
   private cdpSession(): CDPSession {
     if (this.cdp === undefined) throw new Error(this.unusable())
@@ -4454,7 +4430,7 @@ export class SessionBrowser {
 
   /** Record a state change and tell the watchers. */
   private setState(state: BrowserState): void {
-    this.state = state
+    this.host.state = state
     this.publish()
   }
 
@@ -4462,5 +4438,31 @@ export class SessionBrowser {
   private publish(): void {
     const status = this.status()
     for (const watcher of this.watchers) watcher(status)
+  }
+
+  // ---- What the browser process tells this conversation -------------------
+
+  /** The process started, or its state changed. */
+  hostChanged(): void {
+    this.publish()
+  }
+
+  /** The process went away, taking this conversation's pages with it. */
+  hostGone(_reason: string): void {
+    this.forgetOwnState()
+    this.publish()
+  }
+
+  /**
+   * A page the browser opened while this conversation was acting.
+   *
+   * This is the only moment the page can be attributed: the protocol carries no
+   * "who opened this", and `openerId` exists only for the `window.open` path, so
+   * the attribution is the *action* that was running. A page that appeared while
+   * this conversation's call was in flight is its own; nothing else is.
+   * @param page - the new page, before anything has adopted it.
+   */
+  hostPage(page: Page): void {
+    this.offer(page)
   }
 }

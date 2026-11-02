@@ -102,6 +102,13 @@ test('a viewer that names no page watches the active page, as before', async () 
   await pool.get('session-a').ensure()
   const socket = new FakeSocket()
   await attach(socket as unknown as WebSocket, pool, 'session-a')
+  // The frame stream is attached behind the subscription, not before the opening
+  // status is sent, so waiting on the status alone would emit into a screen cast
+  // that does not exist yet. Waiting on the cast is what makes the frame arrive.
+  await until(
+    () => (launch.browsers[0]?.pages[0]?.cdp.method('Page.startScreencast').length ?? 0) > 0,
+    'the screen cast',
+  )
   await until(() => socket.messages().filter(message => message.type === 'status').at(-1)?.status?.url === 'about:blank', 'the opening status')
   launch.browsers[0]?.pages[0]?.cdp.emit('Page.screencastFrame', FRAME)
   assert.equal(socket.frames().length, 1)

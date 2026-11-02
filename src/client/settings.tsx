@@ -34,6 +34,7 @@ import {
   instanceLine,
   overriddenCount,
   placementsIn,
+  sharedCounts,
   statusLine,
   type BrowserSettingsView,
   type FieldPlacement,
@@ -266,7 +267,11 @@ export function BrowserSettingsSection(
   if (value === undefined) return <p style={styles.intro}>{t('settingsUnavailable')}</p>
 
   const user = (typeof snapshot.user === 'object' && snapshot.user !== null ? snapshot.user : {}) as Record<string, unknown>
-  const persistent = persistentChoice ?? value.userDataDir !== ''
+  // A directory is wanted whenever the mode is not the throwaway one: `session`
+  // and `workspace` both keep their logins. In `workspace` the directory may
+  // stay empty — it then derives from the project — but the row is still the
+  // place a user points it somewhere else.
+  const persistent = persistentChoice ?? value.profileMode !== 'temp'
   /** A field the user layer holds, so clearing it restores the composed value. */
   const owns = (field: keyof BrowserSettingsView): boolean => Object.hasOwn(user, field)
   /** A field is overridden once the user layer holds it. */
@@ -313,6 +318,22 @@ export function BrowserSettingsSection(
           >
             <option value="chrome">{t('settingsChannelChrome')}</option>
             <option value="msedge">{t('settingsChannelEdge')}</option>
+          </select>
+        )
+      case 'profileMode':
+        return (
+          <select
+            style={styles.select}
+            value={value.profileMode}
+            onChange={(event) => {
+              const next = event.target.value as BrowserSettingsView['profileMode']
+              setPersistentChoice(next !== 'temp')
+              write('profileMode', next)
+            }}
+          >
+            <option value="temp">{t('settingsProfileModeTemp')}</option>
+            <option value="session">{t('settingsProfileModeSession')}</option>
+            <option value="workspace">{t('settingsProfileModeWorkspace')}</option>
           </select>
         )
       case 'userDataDir':
@@ -441,6 +462,7 @@ export function BrowserSettingsSection(
   }
 
   const hiddenChanges = overriddenCount(user, foldedPlacements())
+  const shared = sharedCounts(status?.instances ?? [])
 
   return (
     <div style={styles.page}>
@@ -461,7 +483,7 @@ export function BrowserSettingsSection(
               {status?.instances.map(instance => (
                 <div key={instance.sessionId} style={styles.statusRow}>
                   <span style={styles.statusDetail} title={instance.sessionId}>
-                    {instanceLine(instance, t)}
+                    {instanceLine(instance, t, shared.get(instance.sessionId) ?? 1)}
                   </span>
                   <button
                     type="button"
