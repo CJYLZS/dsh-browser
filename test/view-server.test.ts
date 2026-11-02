@@ -121,6 +121,18 @@ async function until(condition: () => boolean, what: string): Promise<void> {
   throw new Error(`timed out waiting for ${what}`)
 }
 
+test('watching a session that has no browser starts none', async () => {
+  // The rule that makes closing a browser from the settings page stick. A pane
+  // that re-subscribes — a tab switched back to, a reloaded client — used to
+  // start a fresh browser over the close the user had just asked for.
+  const { pool, launch } = poolWith()
+  const socket = new FakeSocket()
+  await attach(socket as unknown as WebSocket, pool, 'session-a')
+  assert.equal(launch.browsers.length, 0, 'a viewer started a browser nobody asked for')
+  assert.match(String(socket.messages().find(message => message.type === 'error')?.message), /has no browser to watch/)
+  assert.equal(socket.readyState, 3)
+})
+
 test('input from a viewer that named a page reaches that page', async () => {
   const { pool, launch } = poolWith()
   await pool.get('session-a').ensure()

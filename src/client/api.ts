@@ -32,6 +32,14 @@ export interface ClientTab {
 export interface ClientBrowserStatus {
   /** The session this browser belongs to. */
   readonly sessionId: string
+  /**
+   * The session's title, when the host could read one.
+   *
+   * A session id is not a name: every id starts with `session-` and the rest is
+   * hexadecimal. What a person recognizes is the title, and the harness has one
+   * for every conversation that has said anything.
+   */
+  readonly title?: string | undefined
   readonly state: ClientBrowserState
   /** External CDP port once the browser runs. */
   readonly debugPort?: number | undefined
@@ -110,6 +118,25 @@ export async function closePageRequest(sessionId: string, targetId: string): Pro
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId, targetId }),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+}
+
+/**
+ * Ask the host to stop one session's browser, and every page it holds.
+ *
+ * This is the settings page's control, and it is the one ask in the plugin that
+ * means "this conversation does not want a browser" rather than "close the page
+ * I am looking at". The host decides what that costs: it stops the browser, and
+ * a viewer coming back does not start another.
+ * @param sessionId - the session whose browser should stop.
+ * @throws {Error} when the route refuses.
+ */
+export async function closeBrowserRequest(sessionId: string): Promise<void> {
+  const response = await fetch('/dsh-browser/pages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'close', sessionId, all: true }),
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
 }

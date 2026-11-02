@@ -21,6 +21,7 @@ import {
   PROFILE_DIR_COPY,
   advancedSummary,
   foldedPlacements,
+  instanceLabel,
   instanceLine,
   overriddenCount,
   placementsIn,
@@ -125,9 +126,10 @@ test('the banner reports the strongest state among the running browsers', () => 
   assert.equal(statusLine(undefined, english), en.settingsStatusReading)
 })
 
-test('a session line names the session, its state, and only the facts it has', () => {
+test('a session line names the conversation, its state, and only the facts it has', () => {
   const line = instanceLine(status({
     state: 'ready',
+    title: 'Release checklist',
     debugPort: 9334,
     mode: 'headless',
     tabs: [
@@ -135,17 +137,32 @@ test('a session line names the session, its state, and only the facts it has', (
       { index: 1, url: 'https://example.com/b', active: false },
     ],
   }), english)
+  assert.ok(line.startsWith('Release checklist'), line)
   assert.ok(line.includes('127.0.0.1:9334'), line)
   assert.ok(line.includes('headless'), line)
   assert.ok(line.includes('2 page(s)'), line)
   assert.ok(!line.includes('session-'), `the raw session id leaked into "${line}"`)
 
-  const stopped = instanceLine(status({ state: 'closed' }), english)
+  const stopped = instanceLine(status({ state: 'closed', title: 'Release checklist' }), english)
   assert.ok(stopped.includes(en.settingsInstanceStateStopped), stopped)
   assert.ok(!stopped.includes('CDP'), stopped)
 
   const failed = instanceLine(status({ state: 'failed', error: 'port in use' }), english)
   assert.ok(failed.includes('port in use'), failed)
+})
+
+test('a session with no title is called unnamed, never by its id', () => {
+  // Every id starts with `session-`, so shortening one prints the same eight
+  // hexadecimal characters for every row — a label that distinguishes nothing.
+  const line = instanceLine(status({ state: 'ready' }), english)
+  assert.ok(line.startsWith(en.settingsSessionUnnamed), line)
+  assert.ok(!line.includes('session-'), line)
+  assert.ok(!/\babcdef12\b/u.test(line), line)
+  assert.equal(instanceLabel(status({}), english), en.settingsSessionUnnamed)
+  // A title of nothing but space is no title.
+  assert.equal(instanceLabel(status({ title: '   ' }), english), en.settingsSessionUnnamed)
+  assert.equal(instanceLabel(status({ title: ' Named ' }), english), 'Named')
+  assert.equal(instanceLabel(status({ title: '命名' }), chinese), '命名')
 })
 
 /** One instance of the host's report, with the fields a case cares about. */

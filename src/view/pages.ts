@@ -43,6 +43,12 @@ export type PageRequest =
     /** The page to close, by its CDP target id. */
     readonly targetId: string
   }
+  | {
+    readonly action: 'close'
+    readonly sessionId: string
+    /** Every page of this session, and the browser with it. */
+    readonly all: true
+  }
 
 /**
  * Register the page route for the plugin's lifetime.
@@ -92,10 +98,23 @@ export function registerPages(ctx: Context, pool: BrowserPool): void {
           return
         }
         // A browser that is not there has no page to close, and looking one up
-        // never starts one: a close is not a request for a browser.
+        // never starts one: a close is not a request for a browser. A session
+        // with no browser already has what the ask wanted, which is why an
+        // all-close answers ok here instead of failing.
         const browser = pool.peek(asked.sessionId)
         if (browser === undefined) {
-          response.end(JSON.stringify({ ok: false }))
+          response.end(JSON.stringify('all' in asked ? { ok: true } : { ok: false }))
+          return
+        }
+        if ('all' in asked) {
+          // "This conversation does not want a browser": it is closed and
+          // forgotten here, so every page it held goes with it and the settings
+          // page's row disappears with the browser it described. Forgetting is
+          // the point — the report lists what exists, not what used to — and a
+          // viewer coming back finds nothing to watch rather than a stopped
+          // browser it would have to be told about.
+          await pool.dispose(asked.sessionId)
+          response.end(JSON.stringify({ ok: true }))
           return
         }
         await browser.closePage(asked.targetId)
@@ -121,6 +140,7 @@ async function readBody(request: IncomingMessage): Promise<PageRequest | undefin
       targetId?: unknown
       url?: unknown
       request?: unknown
+      all?: unknown
     }
     if (typeof parsed.sessionId !== 'string' || parsed.sessionId === '') return undefined
     // A body that names a page and no action is the close the client has always
@@ -134,7 +154,11 @@ async function readBody(request: IncomingMessage): Promise<PageRequest | undefin
         ...typeof parsed.request !== 'string' || parsed.request === '' ? {} : { request: parsed.request },
       }
     }
-    if (action !== 'close' || typeof parsed.targetId !== 'string' || parsed.targetId === '') return undefined
+    if (action !== 'close') return undefined
+    // "All" says the session's whole browser goes. It is a flag rather than a
+    // sentinel target id, so a page id can never be mistaken for it.
+    if (parsed.all === true) return { action, sessionId: parsed.sessionId, all: true }
+    if (typeof parsed.targetId !== 'string' || parsed.targetId === '') return undefined
     return { action, sessionId: parsed.sessionId, targetId: parsed.targetId }
   } catch {
     return undefined

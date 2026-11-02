@@ -12,7 +12,9 @@ import { test } from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { BrowserPool } from '../src/browser/pool.ts'
 import { plainConfig, Config } from '../src/config.ts'
+import type { WebSocket } from 'ws'
 import { registerPages } from '../src/view/pages.ts'
+import { attach } from '../src/view/server.ts'
 import { fakeLauncher, type FakeLaunch } from './support/browser.ts'
 
 /** A request body, as the client sends it. */
@@ -34,6 +36,36 @@ interface Answer {
 function json(answer: Answer): unknown {
   assert.ok(answer.text !== undefined, 'the route wrote no body')
   return JSON.parse(answer.text) as unknown
+}
+
+/**
+ * A viewer socket that records what the route sent it.
+ *
+ * Only the parts `attach` touches: the constants its guards read, `send`, and
+ * the two events it subscribes to. Closing runs the close handlers, which is
+ * what releases the mirror.
+ */
+class FakeViewer {
+  readonly OPEN = 1
+  readyState = 1
+  readonly sent: string[] = []
+  private readonly handlers = new Map<string, ((...args: unknown[]) => void)[]>()
+
+  send(data: string): void { this.sent.push(data) }
+
+  on(event: string, listener: (...args: unknown[]) => void): void {
+    this.handlers.set(event, [...this.handlers.get(event) ?? [], listener])
+  }
+
+  close(): void {
+    this.readyState = 3
+    for (const listener of this.handlers.get('close') ?? []) listener()
+  }
+
+  /** The JSON messages it was sent. */
+  messages(): { type?: string; message?: string }[] {
+    return this.sent.map(data => JSON.parse(data) as { type?: string; message?: string })
+  }
 }
 
 /** The route as the webserver holds it. */
@@ -174,6 +206,50 @@ test('a close for a browser that does not exist reports no page closed', async (
   const answer = await h.send({ action: 'close', sessionId: 'session-a', targetId: 'target-0' })
   assert.deepEqual(json(answer), { ok: false })
   assert.equal(h.launch.browsers.length, 0, 'a close started a browser')
+})
+
+test('closing a session stops its browser and every page it holds', async () => {
+  // The settings page's control: "this conversation does not want a browser".
+  // It is the deliberate stop, so the browser goes with the pages rather than
+  // sitting there with none — which is what closing the last page already means.
+  const h = registered()
+  await h.send({ action: 'open', sessionId: 'session-a', request: 'tab-1' })
+  await h.send({ action: 'open', sessionId: 'session-a', request: 'tab-2' })
+  assert.equal(h.tabs().length, 2)
+  const answer = await h.send({ action: 'close', sessionId: 'session-a', all: true })
+  assert.deepEqual(json(answer), { ok: true })
+  assert.equal(h.launch.browsers[0]?.closed, true, 'the session asked for no browser and kept one')
+  assert.equal(h.pool.peek('session-a'), undefined, 'a closed browser stays in the report nobody can read')
+})
+
+test('closing a session that has no browser succeeds, because it already has what it asked for', async () => {
+  const h = registered()
+  const answer = await h.send({ action: 'close', sessionId: 'session-a', all: true })
+  assert.deepEqual(json(answer), { ok: true })
+  assert.equal(h.launch.browsers.length, 0, 'a close started a browser')
+})
+
+test('a session closed from the settings page is not brought back by the page it was watching', async () => {
+  // The whole point of the close: a viewer that comes back must find it stopped.
+  // Re-subscribing is not a request for a browser — the ask for a page is, and
+  // that is the guide entry's own action rather than something the sync loop
+  // does on its own.
+  const h = registered()
+  await h.send({ action: 'open', sessionId: 'session-a', request: 'tab-1' })
+  const targetId = h.tabs()[0]?.targetId
+  assert.ok(targetId !== undefined)
+  await h.send({ action: 'close', sessionId: 'session-a', all: true })
+  const socket = new FakeViewer()
+  await attach(socket as unknown as WebSocket, h.pool, 'session-a', targetId)
+  assert.match(String(socket.messages().find(message => message.type === 'error')?.message), /has no browser to watch/)
+  assert.equal(h.launch.browsers[0]?.closed, true)
+})
+
+test('an ask that names neither a page nor "all" still closes nothing', async () => {
+  const h = registered()
+  const answer = await h.send({ action: 'close', sessionId: 'session-a', all: false })
+  assert.deepEqual(json(answer), { ok: false })
+  assert.equal(h.launch.browsers.length, 0)
 })
 
 test('the route refuses a method it does not serve', async () => {

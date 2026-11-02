@@ -334,44 +334,56 @@ export function BrowserBody({ sessionId, t, useTabInfo }: BrowserBodyProps): Rea
     // its input, and its address bar are the page's whether or not the tools
     // act on it right now.
     if (pageId !== undefined) query.page = pageId
+    let cancelled = false
+    let socket: WebSocket | undefined
     // A pane with no page is the browser entry's own: it exists to hold the page
     // this ask produces, so it asks for one. This is the only thing that opens a
     // page on the user's behalf — a browser already running gets a tab of its
     // own here rather than the one that is already there.
-    if (pageId === undefined && tabId !== undefined) {
-      void openPageRequest(sessionId, tabId).catch(() => {})
-    }
-    const socket = new WebSocket(streamUrl(STREAM_PATH, query))
-    socket.binaryType = 'arraybuffer'
-    socket.onopen = () => { setConnected(true) }
-    socket.onclose = () => { setConnected(false) }
-    socket.onerror = () => { setConnected(false) }
-    socket.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
-      if (typeof event.data !== 'string') {
-        void drawFrame(event.data)
-        return
+    //
+    // The socket opens after the ask answers, not beside it. Watching never
+    // starts a browser — that is what makes closing one from the settings page
+    // stick — so a socket opened first would find nothing to watch for exactly
+    // as long as the browser takes to start, and draw a failure over it.
+    const asking = pageId !== undefined || tabId === undefined
+      ? Promise.resolve()
+      : openPageRequest(sessionId, tabId).then(() => undefined, () => undefined)
+    void asking.then(() => {
+      if (cancelled) return
+      const opened = new WebSocket(streamUrl(STREAM_PATH, query))
+      socket = opened
+      socketRef.current = opened
+      opened.binaryType = 'arraybuffer'
+      opened.onopen = () => { setConnected(true) }
+      opened.onclose = () => { setConnected(false) }
+      opened.onerror = () => { setConnected(false) }
+      opened.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
+        if (typeof event.data !== 'string') {
+          void drawFrame(event.data)
+          return
+        }
+        const parsed = JSON.parse(event.data) as { type?: string; status?: MirrorStatus; message?: unknown; text?: unknown }
+        if (parsed.type === 'status' && parsed.status !== undefined) {
+          setStatus(parsed.status)
+          setFailure(undefined)
+          return
+        }
+        // A refused action is otherwise invisible: the status the viewer holds is
+        // unchanged, so the failure is what explains why nothing moved.
+        if (parsed.type === 'error') setFailure(String(parsed.message))
+        // The mirror's selection, on its way back from the host. It is spent at
+        // once and can only be spent once: it belongs to the chord that asked.
+        if (parsed.type === 'clipboard') {
+          const settle = clipboardRef.current
+          clipboardRef.current = undefined
+          settle?.(String(parsed.text ?? ''))
+        }
       }
-      const parsed = JSON.parse(event.data) as { type?: string; status?: MirrorStatus; message?: unknown; text?: unknown }
-      if (parsed.type === 'status' && parsed.status !== undefined) {
-        setStatus(parsed.status)
-        setFailure(undefined)
-        return
-      }
-      // A refused action is otherwise invisible: the status the viewer holds is
-      // unchanged, so the failure is what explains why nothing moved.
-      if (parsed.type === 'error') setFailure(String(parsed.message))
-      // The mirror's selection, on its way back from the host. It is spent at
-      // once and can only be spent once: it belongs to the chord that asked.
-      if (parsed.type === 'clipboard') {
-        const settle = clipboardRef.current
-        clipboardRef.current = undefined
-        settle?.(String(parsed.text ?? ''))
-      }
-    }
-    socketRef.current = socket
+    })
     return () => {
+      cancelled = true
       socketRef.current = undefined
-      socket.close()
+      socket?.close()
     }
   }, [drawFrame, sessionId, pageId, tabId])
 

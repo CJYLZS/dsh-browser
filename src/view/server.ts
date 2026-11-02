@@ -111,11 +111,13 @@ export async function attach(
   }
   let browser: SessionBrowser
   try {
-    // A viewer that names a page is pointing at one the tab list reported, so
-    // the browser must already be there; looking one up never starts one. A
-    // viewer that names no page may arrive first — that is what starts a
-    // browser the guide entry promised.
-    browser = pageId === undefined ? pool.get(sessionId) : pool.peek(sessionId) ?? missing(sessionId)
+    // Watching is not asking for a browser. A viewer is pointed at one the tab
+    // list or the guide entry already reported; if it is not there, a person
+    // closed it and the pane says so rather than starting a browser nobody asked
+    // for. Opening a page is the one path that does start one, and the pane that
+    // asks waits for its own ask before it connects — so a browser this route
+    // cannot find is one nobody is starting.
+    browser = pool.peek(sessionId) ?? missing(sessionId)
   } catch (error) {
     // The socket is already upgraded, so the refusal travels as a message the
     // pane can show rather than as a status code nobody will see.
@@ -187,7 +189,7 @@ export async function attach(
 }
 
 /**
- * The refusal for a viewer that names a page of a browser that does not exist.
+ * The refusal for a viewer that named a browser that does not exist.
  * @param sessionId - the session the viewer named.
  * @returns an error carrying that sentence, typed as the browser it stands in for.
  */

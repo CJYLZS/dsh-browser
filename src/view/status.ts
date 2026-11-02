@@ -21,6 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type { BrowserPool } from '../browser/pool.ts'
+import { SessionLabels } from './labels.ts'
 
 /** Path the settings page reads the live browser state from. */
 export const STATUS_PATH = '/dsh-browser/status'
@@ -31,6 +32,9 @@ export const STATUS_PATH = '/dsh-browser/status'
  * @param pool - the browsers whose state is reported.
  */
 export function registerStatus(ctx: Context, pool: BrowserPool): void {
+  // One cache for the route's lifetime: the page polls, and reading a session's
+  // title means folding its log.
+  const labels = new SessionLabels(ctx)
   ctx.inject(['webServer', 'connection'], (scoped) => {
     scoped.effect(() => scoped.webServer.register({
       kind: 'exact',
@@ -50,7 +54,14 @@ export function registerStatus(ctx: Context, pool: BrowserPool): void {
         })
         // The tab list is read fresh — the titles pages carry now — which is
         // what the sidebar's 1:1 tabs and the banner's page counts answer with.
-        response.end(JSON.stringify(await pool.statusAsync()))
+        // Each entry also carries its Session's name, because the page that
+        // reads this lists conversations and not ids.
+        const report = await pool.statusAsync()
+        const named = await Promise.all(report.instances.map(async (instance) => {
+          const title = await labels.titleOf(instance.sessionId)
+          return title === undefined ? instance : { ...instance, title }
+        }))
+        response.end(JSON.stringify({ maxInstances: report.maxInstances, instances: named }))
       },
     }), 'dsh-browser: status route')
   })

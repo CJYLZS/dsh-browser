@@ -23,7 +23,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactElement, type ReactNode } from 'react'
 import type { ConfigForm, SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { DshBrowserKey } from './locales.ts'
-import { browserStatus, type ClientBrowserReport } from './api.ts'
+import { browserStatus, closeBrowserRequest, type ClientBrowserReport } from './api.ts'
 import {
   ADVANCED_GROUPS,
   FIELD_COPY,
@@ -92,7 +92,8 @@ const styles: Readonly<Record<string, CSSProperties>> = {
     color: 'var(--dsw-alias-label-secondary)',
   },
   statusText: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 },
-  statusDetail: { fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)', wordBreak: 'break-all', display: 'block' },
+  statusDetail: { fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)', wordBreak: 'break-word', display: 'block' },
+  statusRow: { display: 'flex', gap: '8px', alignItems: 'baseline', justifyContent: 'space-between' },
   statusSummary: { fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary)', cursor: 'pointer' },
   statusFailed: { color: 'var(--dsw-alias-state-error-primary)' },
   fold: { display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '0.5px solid var(--dsw-alias-border-l2)', paddingTop: '12px' },
@@ -184,6 +185,9 @@ export function BrowserSettingsSection(
   const [statusError, setStatusError] = useState<string | undefined>(undefined)
   const [saveError, setSaveError] = useState<string | undefined>(undefined)
   const [saved, setSaved] = useState(false)
+  /** The session whose browser is being stopped right now, if one is. */
+  const [closing, setClosing] = useState<string | undefined>(undefined)
+  const [closeError, setCloseError] = useState<string | undefined>(undefined)
   const timers = useRef<number[]>([])
 
   /** Read the host's live state; the page cannot see the browser any other way. */
@@ -203,6 +207,27 @@ export function BrowserSettingsSection(
       for (const id of pending) window.clearTimeout(id)
       pending.length = 0
     }
+  }, [refresh])
+
+  /**
+   * Stop one session's browser and re-read the report it should leave.
+   *
+   * The button belongs to a session rather than to the process: what it asks is
+   * "this conversation does not want a browser", and the host decides whether
+   * that stops a process. The row goes away when the ask answers, because the
+   * report lists the browsers that exist and not the ones that did.
+   * @param sessionId - the session whose browser should stop.
+   */
+  const closeBrowser = useCallback((sessionId: string): void => {
+    setClosing(sessionId)
+    setCloseError(undefined)
+    void closeBrowserRequest(sessionId).then(() => {
+      refresh()
+    }).catch((error: unknown) => {
+      setCloseError(error instanceof Error ? error.message : String(error))
+    }).finally(() => {
+      setClosing(undefined)
+    })
   }, [refresh])
 
   /**
@@ -434,10 +459,24 @@ export function BrowserSettingsSection(
                 {t('settingsSessionsCount').replace('{count}', String(status?.instances.length ?? 0))}
               </summary>
               {status?.instances.map(instance => (
-                <span key={instance.sessionId} style={styles.statusDetail}>
-                  {instanceLine(instance, t)}
-                </span>
+                <div key={instance.sessionId} style={styles.statusRow}>
+                  <span style={styles.statusDetail} title={instance.sessionId}>
+                    {instanceLine(instance, t)}
+                  </span>
+                  <button
+                    type="button"
+                    style={styles.reset}
+                    disabled={closing === instance.sessionId}
+                    title={t('settingsSessionClose')}
+                    onClick={() => { closeBrowser(instance.sessionId) }}
+                  >
+                    {closing === instance.sessionId ? t('settingsSessionClosing') : t('settingsSessionClose')}
+                  </button>
+                </div>
               ))}
+              {closeError === undefined
+                ? null
+                : <span style={styles.statusFailed}>{t('settingsSessionCloseFailed').replace('{error}', closeError)}</span>}
             </details>
           )}
         </div>

@@ -212,13 +212,28 @@ export function instanceLine(instance: ClientBrowserStatus, t: (key: DshBrowserK
       : instance.state === 'failed'
         ? `${t('settingsInstanceStateFailed')} — ${instance.error ?? ''}`.trim()
         : t('settingsInstanceStateStopped')
-  // Every session id starts with `session-`, so shortening the raw id would
-  // print the same eight characters for all of them.
-  const label = instance.sessionId.replace(/^session-/, '').slice(0, 8)
-  const parts = [`${t('settingsSession')} ${label}`, state]
+  const parts = [instanceLabel(instance, t), state]
   if (instance.debugPort !== undefined) parts.push(`CDP 127.0.0.1:${instance.debugPort}`)
   if (instance.mode !== undefined) parts.push(instance.mode)
   const pages = instance.tabs?.length ?? 0
   if (pages > 0) parts.push(t('settingsInstancePages').replace('{count}', String(pages)))
   return parts.join(' · ')
+}
+
+/**
+ * What one session's browser is called on the page.
+ *
+ * The title when the host could read one, and "unnamed session" when it could
+ * not. The raw id is deliberately not the fallback: every id starts with
+ * `session-`, so shortening one prints the same eight hexadecimal characters
+ * for every row and tells the user nothing about which conversation it is. The
+ * id belongs in the row's tooltip, where it costs nothing and settles a tie
+ * between two conversations with the same name.
+ * @param instance - one entry of the report.
+ * @param t - copy for this namespace.
+ * @returns the label to show for its row.
+ */
+export function instanceLabel(instance: ClientBrowserStatus, t: (key: DshBrowserKey) => string): string {
+  const title = instance.title?.trim() ?? ''
+  return title === '' ? t('settingsSessionUnnamed') : title
 }

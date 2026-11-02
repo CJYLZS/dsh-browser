@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { closePageRequest, openPageRequest } from '../src/client/api.ts'
+import { closeBrowserRequest, closePageRequest, openPageRequest } from '../src/client/api.ts'
 
 /** The real fetch, restored after every test. */
 const realFetch = globalThis.fetch
@@ -72,4 +72,18 @@ test('closing a page names the page, not the tab that showed it', async () => {
     url: '/dsh-browser/pages',
     body: { sessionId: 'session-a', targetId: 'target-7' },
   }])
+})
+
+test('closing a browser names the session rather than a page, and asks for all of it', async () => {
+  // The settings page's control is about a conversation, not about the page the
+  // user happens to be looking at, so the body carries no target id at all.
+  const calls = recordingFetch({ body: { ok: true } })
+  await closeBrowserRequest('session-a')
+  assert.deepEqual(calls, [{
+    url: '/dsh-browser/pages',
+    body: { action: 'close', sessionId: 'session-a', all: true },
+  }])
+  // A refused close must not look like one that happened.
+  recordingFetch({ status: 401 })
+  await assert.rejects(() => closeBrowserRequest('session-a'), /HTTP 401/)
 })
