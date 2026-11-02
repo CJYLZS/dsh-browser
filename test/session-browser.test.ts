@@ -2251,3 +2251,89 @@ test('candidates with no name are not told to narrow by a name they do not have'
     return true
   })
 })
+
+/** A document whose script never runs: every timer-shaped question hangs. */
+function frozenDocument(page: FakePage, settleHangs = true): void {
+  page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
+    const expression = String(params['expression'])
+    // The plugin's own timer question. A real sandboxed document never answers
+    // it, which is the state the probe exists to name, so the fake answers with
+    // a promise that never settles — exactly what the browser did on 2026-11-02.
+    if (expression.includes('setTimeout') && expression.includes('done(true)')) {
+      return new Promise(() => {})
+    }
+    if (expression.includes('MutationObserver')) return { result: { value: 0 } }
+    if (expression.includes('__dshSettle')) {
+      return settleHangs ? new Promise(() => {}) : { result: { value: { mutations: 0, settled: true, changes: [], omitted: 0 } } }
+    }
+    if (expression.includes('performance.timeOrigin')) {
+      return { result: { value: { url: page.url, title: 'raw file', origin: 1_700_000_009_999 } } }
+    }
+    return { result: { value: 'evaluated' } }
+  })
+}
+
+test('a document that runs no script does not hang the action that visits it', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  frozenDocument(page)
+  // Measured 2026-11-02: this call held its whole 45 s budget on
+  // raw.githubusercontent.com, because the settle probe parked a promise in a
+  // document that never runs a timer. A regression here is a call that never
+  // returns, so the assertion is that it returns at all — and that it says what
+  // the page is rather than pretending the page was observed.
+  const report = await browser.click('e2')
+  assert.equal(report.staticDocument, true)
+  assert.deepEqual([...report.changed], [])
+  assert.equal(report.settled, true)
+})
+
+test('a page that runs no script is not armed with a probe at all', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  frozenDocument(page)
+  await browser.click('e2')
+  page.cdp.calls.length = 0
+  await browser.click('e2')
+  assert.deepEqual(
+    page.cdp.method('Runtime.evaluate').filter(call => String(call.params['expression']).includes('__dshSettle')),
+    [],
+    'the second action armed a probe on a document already measured as one that runs no script',
+  )
+})
+
+test('an ordinary page is still observed, so the verdict is not a blanket "static"', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  observe(page, 2)
+  const report = await browser.click('e2')
+  assert.equal(report.staticDocument, undefined)
+  assert.equal(report.mutations, 2)
+  assert.ok(report.changed.includes('dom'))
+})
+test('a document that freezes between arming and reading does not hang the action', async () => {
+  const { browser, page } = await started()
+  await browser.snapshot()
+  // The first state read says the page is ordinary, so the probe is armed; every
+  // read after that hangs, which is what a page that navigates into a sandboxed
+  // document mid-action looks like from here. Only the bound on the read keeps
+  // this call from waiting forever — an unbounded await is the 45 s hang that
+  // was measured on a real raw file page.
+  let reads = 0
+  page.cdp.answers.set('Runtime.evaluate', (params: Record<string, unknown>) => {
+    const expression = String(params['expression'])
+    if (expression.includes('MutationObserver')) return { result: { value: 0 } }
+    if (expression.includes('done(true)')) {
+      reads += 1
+      return reads <= 1 ? { result: { value: true } } : new Promise(() => {})
+    }
+    if (expression.includes('__dshSettle')) return new Promise(() => {})
+    if (expression.includes('performance.timeOrigin')) {
+      return { result: { value: { url: page.url, title: 'raw file', origin: 1_700_000_009_998 } } }
+    }
+    return { result: { value: 'evaluated' } }
+  })
+  const report = await browser.click('e2')
+  assert.deepEqual([...report.changed], [])
+  assert.equal(report.mutations, 0)
+})

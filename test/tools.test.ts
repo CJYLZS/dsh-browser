@@ -67,6 +67,19 @@ test('an action that never settled is reported as unfinished, with what it did s
   )
 })
 
+test('a sandboxed document is named instead of being reported as unchanged', () => {
+  // "The page did not change" is evidence about an action, and this page cannot
+  // produce evidence about anything: nothing in it runs. Measured 2026-11-02 on
+  // a raw file page, whose `sandbox` header suspends the document's script.
+  const text = changedText(report({ staticDocument: true }))
+  assert.match(text, /runs no script of its own/)
+  assert.match(text, /sandboxed document/)
+  assert.doesNotMatch(text, /did not change/)
+  // The caller's next step is reading it, so the sentence names the tools that
+  // work there rather than leaving it to try an action that cannot.
+  assert.match(text, /browser_snapshot or browser_evaluate/)
+})
+
 test('a click result names the element, the address, and the outcome', () => {
   assert.equal(
     actionText('Clicked button "Send"', report({ changed: ['dom'], mutations: 3 }), TABS),

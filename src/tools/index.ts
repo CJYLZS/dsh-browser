@@ -206,6 +206,15 @@ export function tabsActionText(value: TabsValue): string {
  * @returns one line describing the outcome.
  */
 export function changedText(report: ActionReport): string {
+  // A document that runs no script cannot produce evidence about an action at
+  // all: nothing in it can react, and the settle probe cannot even observe it.
+  // Saying "the page did not change" there would be the evidence-shaped lie this
+  // function exists to avoid, so the report says what the page is instead.
+  if (report.staticDocument === true) {
+    return 'This page runs no script of its own (the response is a sandboxed document), so nothing in '
+      + 'it can react to input and no change can be observed. Read what it shows with '
+      + 'browser_snapshot or browser_evaluate, which both work on it.'
+  }
   const what = report.changed.length === 0 ? '' : `: ${report.changed.join(', ')}`
   if (!report.settled) {
     return `The page was still changing when this returned${what === '' ? '' : ` (changed${what})`}.`
@@ -733,6 +742,7 @@ const ACTION_PROPERTIES = {
     items: { type: 'string' },
   },
   settled: { type: 'boolean', required: true },
+  staticDocument: { type: 'boolean' },
   mutations: { type: 'integer', required: true },
   changes: CHANGES_SCHEMA,
   changesOmitted: { type: 'integer' },

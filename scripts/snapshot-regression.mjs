@@ -25,8 +25,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Config, plainConfig } from '../src/config.ts'
 import { cancelable } from '../src/browser/cancel.ts'
-import { PortAllocator, portWindow } from '../src/browser/ports.ts'
-import { SessionBrowser } from '../src/browser/session-browser.ts'
+import { BrowserPool } from '../src/browser/pool.ts'
 import { launchBrowser } from '../src/browser/launch.ts'
 import { writeText } from '../src/tools/spill.ts'
 
@@ -316,6 +315,19 @@ const BARE_FIXTURE = `<!doctype html><meta charset="utf-8"><title>bare fixture</
 <p>Nothing to focus here.</p>`
 
 /**
+ * A real document whose script Chrome refuses to run.
+ *
+ * raw.githubusercontent answers with `Content-Security-Policy: default-src
+ * 'none'; style-src 'unsafe-inline'; sandbox`, and a `sandbox` without
+ * `allow-scripts` suspends the document's script entirely — measured 2026-11-02,
+ * `setTimeout`, `queueMicrotask`, `requestAnimationFrame` and `MessageChannel`
+ * never ran there, in the page's world and in an isolated one alike, while a
+ * synchronous evaluate answered in a millisecond. This is the page that held
+ * `browser_navigate` for its whole budget.
+ */
+const RAW_FILE_URL = 'https://raw.githubusercontent.com/CJYLZS/dsh-browser/refs/heads/main/AGENTS.md'
+
+/**
  * A page whose content lives where only the page itself can look.
  *
  * An open shadow root and a same-origin `srcdoc` frame both reach the
@@ -441,15 +453,14 @@ async function main() {
     snapshotNodes: 500,
     userDataDir: '',
   }))
-  const browser = new SessionBrowser('session-regression', {
+  const browser = new BrowserPool(
     config,
-    ports: new PortAllocator(portWindow(config.debugPortMin, config.debugPortMax)),
-    launch: launchBrowser,
-    logger: {
+    {
       info: message => { log(`browser: ${message}`) },
       warn: error => { log(`browser warn: ${error.message}`) },
     },
-  })
+    launchBrowser,
+  ).get('session-regression')
 
   try {
     log('\n[1] navigate and read the whole page')
@@ -1196,6 +1207,34 @@ async function main() {
     check('one record asking twice is one page',
       twice.first?.targetId !== undefined && twice.first.targetId === twice.second?.targetId,
       JSON.stringify({ first: twice.first?.targetId ?? null, second: twice.second?.targetId ?? null }))
+
+    log('\n[32] a document that runs no script answers instead of hanging')
+    // Measured 2026-11-02: this address held `browser_navigate` for its whole
+    // 45 s budget. The response carries `Content-Security-Policy: …; sandbox`
+    // without `allow-scripts`, so the document's event loop is suspended and the
+    // settle promise it was handed can never resolve. The check is that the call
+    // returns inside its budget and says what the page is.
+    const sandboxed = await step('navigate to a sandboxed raw file', 45_000,
+      () => browser.navigate(RAW_FILE_URL))
+    check('the action returned and named the document as one that runs no script',
+      sandboxed.staticDocument === true, JSON.stringify({
+        staticDocument: sandboxed.staticDocument ?? null,
+        url: sandboxed.url,
+        settled: sandboxed.settled,
+      }))
+    check('the address is the one asked for', sandboxed.url === RAW_FILE_URL, sandboxed.url)
+    // A sandboxed document still renders and still reads: the page is a block of
+    // text, and what the caller can do with it is read it.
+    const readBack = await step('evaluate in the sandboxed document', 30_000,
+      () => browser.evaluate('document.body.innerText.slice(0, 40)'))
+    check('the document still answers synchronous evaluation',
+      typeof readBack === 'string' && readBack.length > 0, JSON.stringify(readBack).slice(0, 80))
+    // And the browser is usable afterwards: the hang used to leave a call pending
+    // in the page for the rest of the session's life.
+    const afterwards = await step('navigate away from it', 30_000, () => browser.navigate('about:blank'))
+    check('the browser takes the next navigation normally',
+      afterwards.staticDocument === undefined && afterwards.url === 'about:blank',
+      JSON.stringify({ url: afterwards.url, staticDocument: afterwards.staticDocument ?? null }))
 
   } finally {
     await browser.close().catch(() => {})

@@ -219,6 +219,39 @@ const TARGET_TITLES_MS = 1_000
  */
 const SETTLE_SLOT = '__dshSettle'
 
+/**
+ * How long a page gets to run a short timer before it is judged unable to run
+ * script at all, and the timer it is asked to run.
+ *
+ * A page answering its own event loop resolves that timer in single-digit
+ * milliseconds; the budget is generous by two orders of magnitude so that a
+ * merely slow page is never mistaken for one that cannot run at all. The cost is
+ * paid once per document: the verdict is remembered against the document's own
+ * `performance.timeOrigin`, so nothing that stayed healthy pays it twice.
+ */
+const SCRIPT_PROBE_MS = 250
+const SCRIPT_PROBE_TIMER = 10
+
+/**
+ * The expression that asks a page whether it runs its own event loop.
+ *
+ * Every page mechanism a settle probe could wait on was measured on the document
+ * that first exposed this (2026-11-02, raw.githubusercontent): `setTimeout`,
+ * `queueMicrotask`, `requestAnimationFrame` and `MessageChannel` never run
+ * there, in the page's own world and in an isolated one alike, while synchronous
+ * evaluation answers in a millisecond. The cause is the response's
+ * `Content-Security-Policy: …; sandbox` without `allow-scripts`, which suspends
+ * script for the whole document. So the question "does a timer run" is the
+ * question "may a probe wait on anything at all", and one timer answers it.
+ * @returns the expression to evaluate, resolving to whether the timer ran.
+ */
+function scriptProbe(): string {
+  return `new Promise((done) => {
+    let ran = false
+    setTimeout(() => { ran = true; done(true) }, ${String(SCRIPT_PROBE_TIMER)})
+  })`
+}
+
 /** A settle probe installed before an action, and where to read what it saw. */
 interface SettleWatch {
   /** The page the action began on. */
@@ -245,6 +278,17 @@ interface PageState {
    * shape a form POST that answers with the same page has.
    */
   readonly origin: number
+  /**
+   * Whether the document runs script of its own, when that has been measured.
+   *
+   * `false` is a document whose event loop is suspended — a response carrying
+   * `Content-Security-Policy: …; sandbox` without `allow-scripts` — and it is
+   * the fact every wait has to know about, because a promise left in such a page
+   * never settles: measured 2026-11-02, a raw file page hung `browser_navigate`
+   * for the whole of its 45 s budget while the browser itself stayed answerable.
+   * Absent means not measured, which is not the same as "yes".
+   */
+  readonly liveScript?: boolean
 }
 
 /** The element an action landed on, as the snapshot described it. */
@@ -502,6 +546,17 @@ export interface ActionReport {
   readonly selected?: readonly string[]
   /** The state a checkbox or radio holds once a `check` call is done. */
   readonly checked?: boolean
+  /**
+   * Whether the page is a document that runs no script of its own.
+   *
+   * A response carrying `Content-Security-Policy: …; sandbox` without
+   * `allow-scripts` — a raw file from GitHub's content host is the case that
+   * found this — is rendered and readable, but nothing in it can run: no timer,
+   * no event handler, no page script. Reported because it changes what the rest
+   * of the result means: "the page did not change" is not evidence about an
+   * action there, and `settled` cannot be observed at all.
+   */
+  readonly staticDocument?: boolean
 }
 
 /** A snapshot plus where in the page it was taken. */
@@ -1820,6 +1875,16 @@ export class SessionBrowser implements SessionParticipant {
   private adoption: Promise<void> = Promise.resolve()
   /** The page that adoption is for; cleared when the browser lets its pages go. */
   private adoptingPage: Page | undefined
+  /**
+   * Whether the document on the active page runs script, by document.
+   *
+   * Keyed by `performance.timeOrigin`, which is what tells one document from the
+   * next: a navigation replaces the entry rather than inheriting a verdict about
+   * the document it replaced. Only a `false` measured on the document now loaded
+   * is ever read, so the one stale case — a new document that happens to answer
+   * the same origin — is settled by the measurement being repeated for it.
+   */
+  private liveScript: { readonly origin: number; readonly runs: boolean } | undefined
 
   /**
    * @param sessionId - the conversation this view serves.
@@ -3494,7 +3559,7 @@ export class SessionBrowser implements SessionParticipant {
    * inside the budget still reports the protocol's own address, and the title
    * is left empty rather than invented.
    * @param page - the page to read; the active one unless said otherwise.
-   * @returns the address, title, and the instant that document started.
+   * @returns the address, title, the instant that document started, and whether it runs script.
    */
   private async stateOf(page: Page | undefined = this.page): Promise<PageState> {
     if (page === undefined) return { url: '', title: '', origin: 0 }
@@ -3519,11 +3584,45 @@ export class SessionBrowser implements SessionParticipant {
           return undefined
         }
       })()
-      if (said !== undefined) return said
+      if (said !== undefined) return { ...said, ...await this.scriptVerdict(said.origin) }
       if (Date.now() >= deadline) break
       await sleep(50)
     }
     return { url: page.url(), title: '', origin: 0 }
+  }
+
+  /**
+   * Whether the document that started at `origin` runs script of its own.
+   *
+   * Asked at all because a document whose script is suspended can never settle
+   * the promises this plugin leaves in it. The signal is the one that was
+   * measured: a timer question that comes back at all means the event loop
+   * answered, and one that never comes back means nothing in that document will
+   * ever come back. A page whose answer is merely unreadable is not evidence of
+   * a suspended document, so it counts as running — a false "it runs" only costs
+   * the bounded wait that now exists anyway (see `readSettle`), while a false
+   * "it does not" would silently stop reporting changes on an ordinary page.
+   * @param origin - `performance.timeOrigin` of the document being asked about.
+   * @returns the verdict for that document.
+   */
+  private async scriptVerdict(origin: number): Promise<{ liveScript?: boolean }> {
+    if (origin === 0) return {}
+    const measured = this.liveScript
+    if (measured !== undefined && measured.origin === origin) return { liveScript: measured.runs }
+    // Not awaited through `evaluateIn`: that path is the one this exists to
+    // bound, so the answer is taken from a race, and a race is exactly what a
+    // page that runs no script gives no answer to.
+    const probed = await until(
+      this.cdpSession().send('Runtime.evaluate', {
+        expression: scriptProbe(),
+        awaitPromise: true,
+        returnByValue: true,
+      }),
+      SCRIPT_PROBE_MS,
+    )
+    const runs = probed.settled
+    this.liveScript = { origin, runs }
+    return { liveScript: runs }
   }
 
   /**
@@ -3567,14 +3666,24 @@ export class SessionBrowser implements SessionParticipant {
     if (started !== undefined) {
       await started.waitForLoadState('domcontentloaded', { timeout: SETTLE_NAVIGATION_MS }).catch(() => {})
     }
+    // Whether the document that is loaded now runs script, asked before anything
+    // waits on it. A navigation is exactly the case a probe armed beforehand
+    // cannot cover: it was installed in the document the action left behind, and
+    // the document it arrived at may be one that runs no script at all — the
+    // measured hang of 2026-11-02, where the read waited on a promise the page
+    // could never settle. Knowing first turns that wait into no wait.
+    const measured = this.page === undefined ? undefined : await this.stateOf(this.page)
+    const frozen = measured?.liveScript === false
     // An action that armed a probe before its input is watched by that probe,
     // as long as it stayed on the page it began on. An action that moved to
     // another page — a link that opened a tab — has its own document, and that
     // document is what gets watched instead; so does a caller that dispatched
     // no input at all, which has nothing to watch for but the navigation.
-    const watch = armed !== undefined && armed.page === this.page
-      ? armed
-      : this.cdp === undefined || this.page === undefined ? undefined : await this.armSettle(this.cdp, this.page)
+    const watch = frozen
+      ? undefined
+      : armed !== undefined && armed.page === this.page
+        ? armed
+        : this.cdp === undefined || this.page === undefined ? undefined : await this.armSettle(this.cdp, this.page)
     let mutations = 0
     let settled = true
     let changes: readonly DomChange[] = []
@@ -3615,6 +3724,7 @@ export class SessionBrowser implements SessionParticipant {
       changed,
       mutations,
       settled,
+      ...after.liveScript === false ? { staticDocument: true } : {},
       ...changes.length === 0 ? {} : { changes },
       ...omitted === 0 ? {} : { changesOmitted: omitted },
       ...detail.element === undefined ? {} : { element: detail.element },
@@ -3633,11 +3743,27 @@ export class SessionBrowser implements SessionParticipant {
    * a page that never moved: measured 2026-09-25 on github.com/trending, where
    * clicking a disclosure reported "did not change" while its menu opened. Only
    * a reaction that is deferred to a later task was ever seen.
+   *
+   * A document that does not run script is not armed at all. The probe resolves
+   * through a timer, and a suspended event loop never runs one: measured
+   * 2026-11-02, a raw file page (served with `Content-Security-Policy: …;
+   * sandbox`) held `browser_navigate` for the whole of its budget waiting for a
+   * promise that could never settle. The observer still works there — DOM
+   * callbacks are not script the document has to run — but nothing else about a
+   * probe does, so a document already measured as one that runs no script is
+   * reported as unchanged rather than waited on.
    * @param cdp - session attached to the page being acted on.
    * @param page - the page the action is about to act on.
-   * @returns where to read what the probe saw.
+   * @returns where to read what the probe saw; its slot is empty when nothing was armed.
    */
   private async armSettle(cdp: CDPSession, page: Page | undefined): Promise<SettleWatch> {
+    // The verdict is read for the document that is loaded now, not for whichever
+    // document was measured last: this is called before an action's input, and
+    // the page may have navigated since. The measurement itself is cached per
+    // document (see `scriptVerdict`), so what this costs per action is the one
+    // read of what the document is.
+    const current = page === this.page ? await this.stateOf(page) : undefined
+    if (current?.liveScript === false) return { page, cdp, slot: '' }
     this.settleSeq += 1
     const slot = `${SETTLE_SLOT}${String(this.settleSeq)}`
     // The comma expression installs the promise without awaiting it, which is
@@ -3654,6 +3780,13 @@ export class SessionBrowser implements SessionParticipant {
    * fields are the types it declares, each field is cut at the bound the page was
    * given as well, and the cap is applied on this side too — a page that ignores
    * the limit it was handed cannot make a tool result grow.
+   *
+   * The read itself is bounded, and it is the only place in this file where a
+   * plain `await` is not enough: the promise it waits on lives in the page, and a
+   * page that stops running script — mid-action, by navigating into a sandboxed
+   * document — never settles it. Measured 2026-11-02: an unbounded await here
+   * held `browser_navigate` for its whole 45 s budget. Falling back is honest,
+   * because the address and title the caller also gets are what carry the change.
    * @param watch - the page and slot the probe was installed with.
    * @returns what the page made, and what it changed while it settled.
    */
@@ -3664,13 +3797,18 @@ export class SessionBrowser implements SessionParticipant {
     omitted: number
   }> {
     const none = { mutations: 0, settled: true, changes: [], omitted: 0 }
+    // Nothing was armed: the document was already known to run no script, and a
+    // probe installed there would only be one more promise that never settles.
+    if (watch.slot === '') return none
     // A page that navigated during the action has no slot to read, and one that
     // answered with something else is a page this cannot be read from; either
     // way the address and title are what carry the change.
-    const observed = await this.evaluateIn(
-      watch.cdp,
-      `(async () => { const record = await globalThis.${watch.slot}; globalThis.${watch.slot} = undefined; return record })()`,
-    ).catch(() => undefined)
+    const read = `(async () => { const record = await globalThis.${watch.slot}; globalThis.${watch.slot} = undefined; return record })()`
+    const probed = await until(
+      this.evaluateIn(watch.cdp, read).catch(() => undefined),
+      SETTLE_MAX_MS + INTERRUPT_QUIET_MS,
+    )
+    const observed = probed.settled ? probed.value : undefined
     if (typeof observed !== 'object' || observed === null) return none
     const record = observed as { mutations?: unknown; settled?: unknown; changes?: unknown; omitted?: unknown }
     const reported: readonly unknown[] = Array.isArray(record.changes) ? record.changes : []
@@ -4175,6 +4313,7 @@ export class SessionBrowser implements SessionParticipant {
     this.adoptingPage = undefined
     this.page = undefined
     this.cdp = undefined
+    this.liveScript = undefined
     this.labels.forgetPage()
   }
 
