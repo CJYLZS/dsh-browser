@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser",
-  "version": "0.2.5",
-  "description": "A real local browser per DeepSeek Harness conversation: mirrored into the right Sidebar, driven by the agent with nine tools, and attachable over its own CDP port.",
+  "version": "0.2.6",
+  "description": "A real Chrome or Edge for the agent to work in, mirrored in the sidebar so you can watch and take over. One browser per conversation, with its own sign-ins.",
   "license": "MIT",
   "keywords": [
     "deepseek-harness",
@@ -41,7 +41,8 @@
     }
   },
   "engines": {
-    "node": ">=22.19"
+    "node": ">=22.19",
+    "dsh": ">=0.1.7-rc.1"
   },
   "scripts": {
     "build": "tsdown",

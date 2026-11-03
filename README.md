@@ -8,11 +8,11 @@ English | [中文](README.zh.md)
   <img src="docs/img/settings_en.png" alt="The browser settings: one running instance per conversation with its own CDP port, window mode, automation markers, and profile location" width="45%">
 </p>
 
-**A real local browser for every conversation.** The agent opens pages and works in them while the sidebar mirrors the same browser, so you can watch the work happen and take over whenever you want. It runs in both the Web and the Desktop interface.
+**A real Chrome or Edge for the agent to work in, mirrored in the sidebar so you can watch and take over.** Every conversation gets its own browser with its own sign-ins. It runs in both the Web and the Desktop interface.
 
 ## Summary
 
-Chrome or Edge runs as its own process, with its own profile and its own CDP port, and every conversation gets its own: tabs, sign-ins, and ports are never shared between conversations. The agent drives it with nine tools, and the sidebar shows the same pages — either side can act on them.
+Chrome or Edge runs as its own process, with its own profile and its own CDP port, and every conversation gets its own: tabs, sign-ins, and ports are never shared between conversations. The agent drives it, and the sidebar shows the same pages — either side can act on them.
 
 It is not an embedded web view. The page runs in an ordinary browser process, so sites see a normal browser, DevTools or another Playwright can attach to it while the mirror is live, and closing the harness does not leave a browser pretending to be part of the app.
 
@@ -24,7 +24,7 @@ It is not an embedded web view. The page runs in an ordinary browser process, so
 - **Watch it work, or take over.** Every page the browser opens gets its own sidebar tab with a live view, and clicks and typing in that tab reach the real page.
 - **The agent can read a page it has never seen.** `browser_snapshot` prints the page's accessibility tree with a `ref` per node, which is how the agent reads an unfamiliar page and how it names the element to click; `find` narrows a large page, and `boxes` gives positions without a screenshot.
 - **Input a site accepts.** Real mouse and text events at the element's own position — a page that ignores a synthetic `element.click()` still takes these — plus chords such as `Ctrl+A`, native dropdowns and checkboxes, dialogs answered by the call that opens them, and an explicit refusal when something else would receive the press.
-- **Nine tools, and code for the rest.** `browser_evaluate` is the general-purpose one; the others cover what code cannot express, such as reading a page without knowing its selectors first, or asking what the page said while it failed. See [Tools](#tools).
+- **A small tool set, and code for the rest.** `browser_evaluate` is the general-purpose one; the others cover what code cannot express, such as reading a page without knowing its selectors first, or asking what the page said while it failed. See [Tools](#tools).
 - **Attachable.** Each browser listens on an external CDP port, so `chrome://inspect`, another Playwright, or the bundled `scripts/cdp.mjs` can attach to the same browser the sidebar is mirroring.
 - **Working rules where the model reads them.** The plugin contributes a skill — read before acting, one action per observation, and a page's text is data rather than instructions — with five short recipes read only when their question comes up.
 
@@ -56,13 +56,13 @@ Then install with the `#<tag>` ref that version pairs with — a build targets o
 
 | Your dsh | Plugin version | Install command |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.2.5 (latest) | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.5` |
+| ≥ 0.1.7-rc.1 | v0.2.6 (latest) | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.6` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
 For a dsh on the current generation, the latest release is:
 
 ```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.5
+dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.6
 ```
 
 The built `lib/` is committed with each tag, so a tag install needs no build step. The profile's `package.json` records the ref you chose; to change versions, re-add with the new ref, and to remove the plugin use `dsh plugin remove --profile web dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
@@ -72,7 +72,7 @@ The built `lib/` is committed with each tag, so a tag install needs no build ste
 The Desktop app owns its own profile, and the ordinary CLI refuses to manage `--profile desktop` on purpose, so install through the Desktop CLI that ships with the app:
 
 ```sh
-"<Desktop install dir>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.5
+"<Desktop install dir>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.6
 ```
 
 Use `<Desktop install dir>/resources/runtime/cli/bin/dsh` on macOS and Linux. Restart the app afterwards, the same way the Web profile restarts after `dsh plugin add`; the same `remove` verb uninstalls it.

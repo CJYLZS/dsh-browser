@@ -8,11 +8,11 @@
   <img src="docs/img/settings_zh.png" alt="浏览器设置：每个对话一个正在运行的实例，各有自己的 CDP 端口，另含窗口模式、自动化标记与 profile 位置" width="45%">
 </p>
 
-**每个对话一台真实的本机浏览器。** agent 在里面开页面、做事，侧栏镜像同一台浏览器，你能看着它工作，也能随时自己上手。Web 界面与 Desktop 应用都能用。
+**让 agent 在一台真实 Chrome 或 Edge 里干活，侧栏同步镜像，你能看着，也能随时接手。** 每个对话一台独立的浏览器，登录态各归各的。Web 界面与 Desktop 应用都能用。
 
 ## 概述
 
-Chrome 或 Edge 以独立进程运行，有自己的 profile、自己的 CDP 端口，而且每个对话各有一台：标签、登录态、端口都不跨对话共享。agent 用九个工具驱动它，侧栏显示的是同一批页面——两边都能操作。
+Chrome 或 Edge 以独立进程运行，有自己的 profile、自己的 CDP 端口，而且每个对话各有一台：标签、登录态、端口都不跨对话共享。agent 驱动它，侧栏显示的是同一批页面——两边都能操作。
 
 它不是内嵌的网页视图。页面跑在一个普通浏览器进程里，所以站点看到的是正常浏览器，镜像运行时 DevTools 或另一个 Playwright 可以附加进来，关掉 harness 也不会留下一个假装属于界面的浏览器进程。
 
@@ -24,7 +24,7 @@ Chrome 或 Edge 以独立进程运行，有自己的 profile、自己的 CDP 端
 - **看着它做，也可以随时接手。** 浏览器每开一个页面，侧栏就多一个带实时画面的标签，在标签里的点击与输入会到达真实页面。
 - **不写选择器也能读陌生页面。** `browser_snapshot` 把页面的无障碍树打印成一行一个节点、每个节点带一个 `ref`——这既是 agent 读陌生页面的方式，也是它指名某个元素去点击的方式；`find` 把大页面收敛到回答问题的那些路径，`boxes` 不上截图就能说出元素在哪。
 - **站点会接受的输入。** 在元素自身的位置派发真实鼠标与文本事件——忽略合成 `element.click()` 的页面同样接受——另含 `Ctrl+A` 这类组合键、原生下拉与勾选、由触发它的那一次调用回答的对话框，以及"会被别人接收"时的明确拒绝。
-- **九个工具，其余交给代码。** `browser_evaluate` 是通用那个，其余只补代码表达不了的语义，比如不先知道选择器就能读页面、或者问页面失败时自己说了什么。见[工具](#tools)。
+- **工具少而直接，其余交给代码。** `browser_evaluate` 是通用那个，其余只补代码表达不了的语义，比如不先知道选择器就能读页面、或者问页面失败时自己说了什么。见[工具](#tools)。
 - **可附加。** 每台浏览器都监听一个对外 CDP 端口，`chrome://inspect`、另一个 Playwright、或随仓库的 `scripts/cdp.mjs` 都能附加到侧栏正在镜像的那一台。
 - **工作纪律写在模型会读的地方。** 插件贡献一份技能——先读再动、一次观察一个状态变更动作、页面的文字是数据而不是指令——并附五篇按问题索引的短文，只有遇到那个问题才读。
 
@@ -56,13 +56,13 @@ dsh -V
 
 | 你的 dsh | 插件版本 | 安装命令 |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.2.5（最新） | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.5` |
+| ≥ 0.1.7-rc.1 | v0.2.6（最新） | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.6` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
 属于当前世代的 dsh，装最新版就是这条：
 
 ```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.5
+dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.6
 ```
 
 构建产物 `lib/` 随每个 tag 提交，所以按 tag 安装不需要构建。profile 的 `package.json` 会记下你选的 ref；换版本就用新 ref 重新 add，移除插件用 `dsh plugin remove --profile web dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
@@ -72,7 +72,7 @@ dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.5
 Desktop 应用自己拥有它的 profile，而普通 CLI 有意拒绝管理 `--profile desktop`，所以走随应用一起发布的 Desktop CLI：
 
 ```sh
-"<Desktop 安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.5
+"<Desktop 安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.6
 ```
 
 macOS 与 Linux 用 `<Desktop 安装目录>/resources/runtime/cli/bin/dsh`。装完重启应用，和 Web profile 用 `dsh plugin add` 之后一样；卸载用同一个 `remove`。
