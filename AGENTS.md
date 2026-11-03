@@ -99,7 +99,11 @@
 
 **为什么必须隔离。** 2026-10-31 一次真机验证误删了 `~/.dsh` 的 `sessions/` 与 `storages/`，历史会话全丢、回收站里也没有（说明是永久删除）。此后每一次真机验证都跑在独立 `DSH_HOME` 下：**物理上碰不到 `~/.dsh`**。这不是洁癖，是那次事故的直接教训。
 
-**不要用 desktop profile 验证。** `desktop` 由 Electron 独占（`args.ts` 的 `rejectElectronProfile` 会直接拒绝），而且它的 `dsh-browser` 来自 `github:CJYLZS/dsh-browser`，不是你工作区刚构建的 `lib/`。验证本地改动必须让 profile 依赖指向工作区：
+**不要用 desktop profile 验证。** `desktop` 由 Electron 独占（`args.ts` 的 `rejectElectronProfile` 会直接拒绝），命令行起不了它，所以它给不了你要的可控重启与日志。验证本地改动必须另开一个 Web profile：
+
+**desktop profile 只用来交付给用户验收**，它的 `dsh-browser` 已指向本工作区（2026-11-03 起是 `file:D:\code\deepseek-harness\lib\dsh-browser`，之前是 `github:CJYLZS/dsh-browser`）。往那里装改动要注意 **`pnpm install` 对已注入的 `file:` 依赖是空操作**：它按 lockfile 判断"already up to date"，`--force` 也一样，于是 `node_modules\dsh-browser` 还是上一版。可靠办法是先删掉那个目录再 install（pnpm 会重建一份新的），然后用 hash 对账 `lib/` 四个文件。装完**必须重启 Desktop 应用**——宿主进程在启动时就把宿主半边读进内存了，客户端 HMR 只换 `client.js`，换不掉 `index.js`。
+
+Web profile 的写法：
 
 ```jsonc
 // D:\dsh-verify\home\profiles\webtest\package.json
