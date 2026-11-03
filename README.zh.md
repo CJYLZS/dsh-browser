@@ -77,6 +77,14 @@ Desktop 应用自己拥有它的 profile，而普通 CLI 有意拒绝管理 `--p
 
 macOS 与 Linux 用 `<Desktop 安装目录>/resources/runtime/cli/bin/dsh`。装完重启应用，和 Web profile 用 `dsh plugin add` 之后一样；卸载用同一个 `remove`。
 
+### 从插件页安装
+
+两个界面都不需要终端：在**插件**页点**添加插件**，填仓库地址并带上 `#<tag>`（截图里是裸地址；不带 ref 会取默认分支 HEAD），再点**安装**——它装进当前正在运行的 profile，在 Desktop 应用里就是应用自己的 profile，所以上面那条 Desktop CLI 不是唯一的路。对话框会说插件要不要等重启，说要就重启。
+
+<p align="center">
+  <img src="docs/img/ui_install_zh.png" alt="Desktop 应用的插件页：添加插件对话框里填着仓库地址，下方是安装按钮" width="60%">
+</p>
+
 -----
 
 <a id="compatibility"></a>

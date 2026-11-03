@@ -77,6 +77,14 @@ The Desktop app owns its own profile, and the ordinary CLI refuses to manage `--
 
 Use `<Desktop install dir>/resources/runtime/cli/bin/dsh` on macOS and Linux. Restart the app afterwards, the same way the Web profile restarts after `dsh plugin add`; the same `remove` verb uninstalls it.
 
+### From the Plugins page
+
+Neither interface needs a terminal for this: **Plugins → Add plugin** takes the repository address with its `#<tag>` pin (the screenshot shows the bare address, and without a ref it takes the default branch HEAD), and **Install** applies it to the profile that is running — in the Desktop app that is the app's own profile, so the Desktop CLI above is not the only way in. The dialog says when the plugin waits for a restart; restart then.
+
+<p align="center">
+  <img src="docs/img/ui_install_en.png" alt="The Plugins page in the Desktop app: the Add plugin dialog with a repository address in the field, and Install below it" width="60%">
+</p>
+
 -----
 
 <a id="compatibility"></a>
