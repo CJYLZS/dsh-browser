@@ -125,8 +125,14 @@ export class BrowserPool {
         ports: this.allocator,
         launch: this.launch,
         logger: this.logger,
+        // The unit is taken once, here, and carried by the process: a workspace
+        // browser outlives the conversation that created it, so re-looking its
+        // workspace up at each start would fail precisely when the survivors
+        // need it (measured 2026-11-03). The directory is still resolved per
+        // start from the current configuration, so a settings change reaches
+        // the next browser.
+        unit: { sessionId, workspace: this.workspaceOfSession(sessionId) },
       })
-      host.profileDir = choice.dir
       this.hosts.set(choice.key, host)
     }
     const view = new SessionBrowser(sessionId, { host, logger: this.logger })

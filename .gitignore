@@ -12,5 +12,10 @@ node_modules/
 # They describe one machine's ACL, not the plugin.
 .acl-recovery/
 
+# `profileMode: workspace` keeps its browser profile inside the project, at
+# <project>/.dsh/browser. When the project is this repository that directory
+# lands here, and it holds cookies, history, and logins: never a source file.
+.dsh/
+
 # The built bundle is committed (lib/), so that a GitHub install needs no build
 # step. Its source maps are part of that bundle and are committed with it.

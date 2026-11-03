@@ -57,6 +57,26 @@ export interface ProfileChoice {
 export type WorkspaceLookup = (sessionId: string) => WorkspaceFacts | undefined
 
 /**
+ * The identity a browser process serves, remembered by the process itself.
+ *
+ * A process outlives the conversation that first asked for it — a `workspace`
+ * browser keeps serving the others after its creator leaves, and any browser may
+ * be restarted long after that conversation was disposed. Re-looking the
+ * workspace up at each start would therefore fail exactly when it matters, so
+ * the facts are taken once, when the process is created, and kept.
+ *
+ * The workspace is held whole rather than by id because an empty `userDataDir`
+ * derives the directory from `workspace.path`: an id alone cannot name a
+ * directory once the registry has forgotten the session.
+ */
+export interface ProfileUnit {
+  /** The conversation that created the process. */
+  readonly sessionId: string
+  /** Its workspace, when it had one; `workspace` mode needs it. */
+  readonly workspace: WorkspaceFacts | undefined
+}
+
+/**
  * Reject a relative parent directory, naming the consequence.
  *
  * Checked here rather than in the configuration schema on purpose. The schema
@@ -100,6 +120,40 @@ export function profileBaseOf(config: BrowserConfig, workspace?: WorkspaceFacts)
     if (configured === '' && workspace !== undefined) return workspaceProfileBase('', workspace)
   }
   return configured === '' ? DEFAULT_PROFILE_BASE : configured
+}
+
+/**
+ * The profile directory a process opens, from the unit it was created for.
+ *
+ * The directory half of {@link chooseProfile}, for a process that already knows
+ * which unit it serves. Separate so a restart never has to re-derive the unit:
+ * see {@link ProfileUnit} for why that lookup cannot be repeated.
+ * @param config - the configuration in force.
+ * @param unit - the identity this process serves.
+ * @returns the directory, or `undefined` for a temporary one.
+ * @throws {Error} when the mode is `workspace` and the unit has no workspace.
+ */
+export function profileDirForUnit(config: BrowserConfig, unit: ProfileUnit): string | undefined {
+  // Temporary means temporary: whatever is in the directory field does not apply,
+  // because a mode that says "nothing is kept" must not write to disk anyway.
+  if (config.profileMode === 'temp') return undefined
+  if (config.profileMode === 'session') {
+    return profileDirOf({ mode: 'session', base: profileBaseOf(config), sessionId: unit.sessionId })
+  }
+  const workspace = unit.workspace
+  if (workspace === undefined) {
+    throw new Error(
+      `dsh-browser: the workspace profile mode shares one browser per workspace, and session `
+      + `${unit.sessionId} is not accounted to any workspace; switch the profile mode to "session" to give `
+      + 'each conversation its own browser, or open the conversation inside a workspace',
+    )
+  }
+  return profileDirOf({
+    mode: 'workspace',
+    base: profileBaseOf(config, workspace),
+    sessionId: unit.sessionId,
+    workspaceId: workspace.id,
+  })
 }
 
 /**

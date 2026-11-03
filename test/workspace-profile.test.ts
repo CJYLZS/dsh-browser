@@ -255,6 +255,95 @@ test('the temp mode still gives every conversation its own browser', async () =>
   assert.notEqual(launch.browsers[0]?.profileDir, launch.browsers[1]?.profileDir)
 })
 
+test('a browser started again opens the profile it was told to, not a fresh temporary one', async () => {
+  // The defect this pins: sign in, close the browser, start it again, and the
+  // sign-in was gone. The directory was resolved once, remembered on the
+  // process, and cleared when the process closed — so the next start was
+  // indistinguishable from a deployment that never named a directory, and it
+  // opened a brand-new temporary profile (measured 2026-11-03).
+  for (const profileMode of ['session', 'workspace'] as const) {
+    const { pool, launch } = poolWith({ profileMode })
+    const view = pool.get('session-a')
+    await view.ensure()
+    const first = launch.browsers[0]?.profileDir
+
+    // What the Sidebar's close control does.
+    await view.stop()
+
+    // What any later request does: a tool call, or the pane's restart button.
+    await view.ensure()
+    const second = launch.browsers[1]?.profileDir
+
+    assert.equal(launch.browsers.length, 2, `${profileMode}: the second request started no browser`)
+    assert.equal(second, first, `${profileMode}: the restarted browser opened a different directory`)
+    assert.ok(first !== undefined && first !== '', `${profileMode}: nothing resolved a directory at all`)
+  }
+})
+
+test('a restart after a crash reopens the same profile, not a new temporary one', async () => {
+  const { pool, launch } = poolWith({ profileMode: 'session' })
+  const view = pool.get('session-a')
+  await view.ensure()
+  const first = launch.browsers[0]?.profileDir
+
+  // The browser dying is the other way the remembered directory was lost.
+  launch.browsers[0]?.die('the window was closed')
+  await view.ensure()
+
+  assert.equal(launch.browsers.length, 2)
+  assert.equal(launch.browsers[1]?.profileDir, first)
+})
+
+test('a directory edit reaches the browser that restarts because of it', async () => {
+  const { pool, launch } = poolWith({ profileMode: 'session', userDataDir: 'D:\\first' })
+  const view = pool.get('session-a')
+  await view.ensure()
+  assert.equal(launch.browsers[0]?.profileDir, join('D:\\first', 'session-a'))
+
+  // The setting is a launch field, so this closes the running browser; the next
+  // start has to read the new directory rather than the one it remembered.
+  await pool.reconfigure(plainConfig(Config({ profileMode: 'session', userDataDir: 'D:\\second' })))
+  await view.ensure()
+
+  assert.equal(launch.browsers.length, 2)
+  assert.equal(launch.browsers[1]?.profileDir, join('D:\\second', 'session-a'))
+})
+
+test('a shared browser whose creator left still finds its profile when restarted', async () => {
+  // A workspace browser outlives the conversation that started it. The profile
+  // directory must therefore not be re-derived by asking the registry about that
+  // conversation: the registry stops accounting for it once it is disposed, and
+  // the survivors' restart would fail exactly then (measured 2026-11-03).
+  const live = new Set(['session-a', 'session-b'])
+  const launch = fakeLauncher()
+  const pool = new BrowserPool(
+    plainConfig(Config({ profileMode: 'workspace' })),
+    logger,
+    launch.launch,
+    async () => true,
+    undefined,
+    id => (live.has(id) ? WORKSPACE : undefined),
+  )
+
+  const a = pool.get('session-a')
+  const b = pool.get('session-b')
+  await a.ensure()
+  const first = launch.browsers[0]?.profileDir
+  assert.ok(first !== undefined && first !== '')
+
+  // The creator goes away; the process stays up for the other conversation.
+  live.delete('session-a')
+  await pool.dispose('session-a')
+  assert.equal(launch.browsers[0]?.closed, false, 'the shared process closed with its creator')
+  assert.equal(b.host.refCount, 1)
+
+  // The survivor stops and restarts it.
+  await b.stop()
+  await b.ensure()
+  assert.equal(launch.browsers.length, 2)
+  assert.equal(launch.browsers[1]?.profileDir, first, 'the survivor restarted onto a different profile')
+})
+
 test('a workspace profile derives its directory from the project when none is configured', () => {
   const choice = chooseProfile(
     plainConfig(Config({ profileMode: 'workspace', userDataDir: '' })),

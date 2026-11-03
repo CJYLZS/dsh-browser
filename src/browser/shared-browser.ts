@@ -33,6 +33,7 @@ import type { BrowserContext, CDPSession, Page } from 'playwright-core'
 import type { BrowserConfig } from '../config.ts'
 import type { BrowserSession, LaunchConfig } from './launch.ts'
 import { PortAllocator } from './ports.ts'
+import { profileDirForUnit, type ProfileUnit } from './profile-choice.ts'
 import type { MirrorFrame } from './screencast.ts'
 
 /** Lifecycle of one browser process as its conversations see it. */
@@ -69,6 +70,17 @@ export interface SharedBrowserDeps {
   readonly launch: Launcher
   /** Where launch outcomes are reported. */
   readonly logger: Logger
+  /**
+   * The identity this process serves, taken once when it was created.
+   *
+   * Held rather than re-derived because a process outlives the conversation that
+   * created it: a `workspace` browser keeps serving the others after its creator
+   * leaves, so asking the registry about that creator again would fail exactly
+   * then (measured 2026-11-03). The *directory* is still resolved per start —
+   * from this unit and the configuration then in force — so a settings change
+   * reaches the next browser.
+   */
+  readonly unit: ProfileUnit
 }
 
 /**
@@ -184,14 +196,34 @@ export class SharedBrowser {
   private config: BrowserConfig
   /** The configuration the running browser was actually started from. */
   private launchConfigAtStart: BrowserConfig | undefined
-  /** The profile directory the caller resolved for the running browser. */
+  /**
+   * The identity this process serves, taken when it was created.
+   *
+   * Held rather than re-derived because a process outlives the conversation that
+   * created it: a `workspace` browser keeps serving the others after its creator
+   * leaves, so asking the registry about that creator again would fail exactly
+   * then (measured 2026-11-03). The directory is still resolved per start, from
+   * this unit and the configuration then in force, so a settings change reaches
+   * the next browser.
+   */
+  readonly unit: ProfileUnit
+  /**
+   * The profile directory the running browser opened, for diagnostics only.
+   *
+   * Where the *next* browser goes is derived from {@link unit} and the
+   * configuration in force at that moment — never read from here. Holding the
+   * answer in this field is what made a stopped-and-restarted browser open a
+   * fresh temporary profile and lose every sign-in, because closing the process
+   * cleared it (2026-11-03).
+   */
   profileDir: string | undefined
   /** The conversations acting right now, so a page they opened is theirs. */
   private readonly acting = new Set<string>()
 
   /**
    * @param key - the pool key this browser answers to.
-   * @param deps - configuration, port owner, launcher, and logger.
+   * @param deps - configuration, port owner, launcher, logger, and the unit this
+   *   process serves.
    */
   constructor(key: string, deps: SharedBrowserDeps) {
     this.key = key
@@ -199,6 +231,7 @@ export class SharedBrowser {
     this.ports = deps.ports
     this.launch = deps.launch
     this.logger = deps.logger
+    this.unit = deps.unit
   }
 
   /** How many conversations are using this browser. */
@@ -309,12 +342,11 @@ export class SharedBrowser {
    * A browser that died or failed is started again here, which is what makes any
    * later request — a tool call, a viewer reconnecting, the pane's restart —
    * recover without reloading the plugin.
-   * @param profileDir - the profile directory the caller resolved; `undefined`
-   *   means a temporary one, which this class creates and removes.
    * @returns after the browser is ready.
-   * @throws {Error} when the browser cannot start.
+   * @throws {Error} when the browser cannot start, including when the profile
+   * mode needs a workspace and this deployment cannot resolve one.
    */
-  async ensure(profileDir: string | undefined): Promise<void> {
+  async ensure(): Promise<void> {
     // Everything that gets here — a tool, a restart, a configuration change —
     // is asking for a browser, so a close the user made earlier no longer
     // stands. The one path that is not a request checks the flag itself.
@@ -324,7 +356,10 @@ export class SharedBrowser {
       await this.starting
       return
     }
-    const started = this.start(profileDir)
+    // Resolved here, per start, rather than remembered: the directory follows
+    // the configuration in force now, and a remembered copy went stale on a
+    // close, a crash, and a settings edit alike.
+    const started = this.start(profileDirForUnit(this.config, this.unit))
     this.starting = started
     try {
       await started
@@ -510,6 +545,8 @@ export class SharedBrowser {
       this.session = undefined
       this.launchedHeadless = undefined
       this.launchConfigAtStart = undefined
+      // The directory the browser opened is not the answer for the next one:
+      // each launch resolves its own, from the configuration in force then.
       this.profileDir = undefined
       this.reason = undefined
       this.setState('closed')

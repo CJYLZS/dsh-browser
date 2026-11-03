@@ -2163,7 +2163,7 @@ export class SessionBrowser implements SessionParticipant {
    */
   async ensure(): Promise<void> {
     const wasReady = this.host.state === 'ready'
-    await this.host.ensure(this.host.profileDir)
+    await this.host.ensure()
     await this.adoptIfUnset()
     // A viewer that stayed subscribed while the browser was being replaced is
     // still watching, and the screen cast died with the old process: it belongs
