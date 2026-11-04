@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文
 
+[![收录于 dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/zh/plugins/cjylzs/dsh-browser)
+
 <img src="docs/img/preview_zh.png" alt="插件在工作：左侧是 agent 的浏览器工具调用，右侧栏镜像着同一台浏览器" width="100%">
 
 <p align="center">
@@ -32,6 +34,9 @@ Chrome 或 Edge 以独立进程运行，有自己的 profile、自己的 CDP 端
 
 - [特点](#highlights)
 - [安装](#install)
+  - [更新](#更新)
+  - [Desktop](#desktop)
+  - [从插件页安装](#从插件页安装)
 - [版本适配](#compatibility)
 - [使用](#usage)
 - [理解设计](#understand-the-design)
@@ -61,12 +66,24 @@ dsh plugin --profile web add @cjylzs/dsh-browser
 | 你的 dsh | 插件版本 | 安装命令 |
 | --- | --- | --- |
 | ≥ 0.1.7-rc.1 | v0.3.x（最新） | `dsh plugin --profile web add @cjylzs/dsh-browser` |
-| ≥ 0.1.7-rc.1，按 tag 装 | v0.2.x / v0.3.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.3.0` |
+| ≥ 0.1.7-rc.1，按 tag 装 | v0.2.x / v0.3.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.3.1` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.1.0` |
 
 从 registry 安装取的是已发布的最新版本；从 GitHub 安装要写该版本对应的 `#<tag>`，因为不带 ref 的 `github:` 安装会取默认分支的 HEAD，那个位置会漂。构建产物 `lib/` 也随每个 tag 提交，所以按 tag 装不需要构建。
 
-profile 的 `package.json` 会记下你装的是什么；换版本就用新 spec 重新 add，移除插件用 `dsh plugin --profile web remove @cjylzs/dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
+profile 的 `package.json` 会记下你装的是什么；移除插件用 `dsh plugin --profile web remove @cjylzs/dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
+
+### 更新
+
+从 registry 装会记成 caret 范围（`^0.3.1`），lockfile 再把该范围解析到的那一版钉死，所以用同一个 spec 重新 add 是空操作——profile 里已经就是它。要在范围内往上升，用 `update`：
+
+```sh
+dsh plugin --profile web update @cjylzs/dsh-browser
+```
+
+想钉死某一版就指名：`dsh plugin --profile web add @cjylzs/dsh-browser@0.3.0`。这记的是精确版本，而 `update` 不动精确版本——要离开它就指名范围或版本（`…@^0.3.0`、`…@0.3.1`）；只写包名重新 add 什么都不变，因为 profile 里已经满足它。`github:` 安装记的是当时解析到的 tag 或 commit，`update` 同样推不动，要换就带上想要的 ref 重新 add：`github:CJYLZS/dsh-browser#v0.3.1`。以上每种情况装完都要重启 harness。
+
+早期版本用的是无 scope 的名字 `dsh-browser`，而 npm 上的那个名字是另一个项目。如果你的 profile 里还记着 `dsh-browser`（`package.json` 的依赖，或 `dsh.profile.bundles` 里的一条），先用 `dsh plugin --profile web remove dsh-browser` 删掉再装这个：两者是两份独立安装，上面那些命令碰不到旧的那个键。
 
 ### Desktop
 

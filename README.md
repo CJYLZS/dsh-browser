@@ -2,6 +2,8 @@
 
 English | [中文](README.zh.md)
 
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/cjylzs/dsh-browser)
+
 <img src="docs/img/preview_en.png" alt="The plugin at work: the agent's browser tool calls beside the same browser mirrored in the sidebar" width="100%">
 
 <p align="center">
@@ -32,6 +34,9 @@ It is not an embedded web view. The page runs in an ordinary browser process, so
 
 - [Highlights](#highlights)
 - [Install](#install)
+  - [Update](#update)
+  - [Desktop](#desktop)
+  - [From the Plugins page](#from-the-plugins-page)
 - [Compatibility](#compatibility)
 - [Usage](#usage)
 - [Understand the design](#understand-the-design)
@@ -61,12 +66,24 @@ dsh plugin --profile web add @cjylzs/dsh-browser
 | Your dsh | Plugin version | Install command |
 | --- | --- | --- |
 | ≥ 0.1.7-rc.1 | v0.3.x (latest) | `dsh plugin --profile web add @cjylzs/dsh-browser` |
-| ≥ 0.1.7-rc.1, from a tag | v0.2.x / v0.3.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.3.0` |
+| ≥ 0.1.7-rc.1, from a tag | v0.2.x / v0.3.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.3.1` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.1.0` |
 
 The registry install takes the latest published version; a `github:` install needs the `#<tag>` ref that version pairs with, because a `github:` install without a ref takes the default branch HEAD, which drifts. The built `lib/` is committed with each tag, so a tag install needs no build step either.
 
-The profile's `package.json` records what you installed; to change versions, re-add with the new spec, and to remove the plugin use `dsh plugin --profile web remove @cjylzs/dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
+The profile's `package.json` records what you installed; to remove the plugin use `dsh plugin --profile web remove @cjylzs/dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
+
+### Update
+
+The registry install records a caret range (`^0.3.1`) and the lockfile pins the exact version that range resolved to, so re-adding the same spec is a no-op — the profile already has it. `update` is what moves within the range:
+
+```sh
+dsh plugin --profile web update @cjylzs/dsh-browser
+```
+
+To pin one release instead, name it: `dsh plugin --profile web add @cjylzs/dsh-browser@0.3.0`. That records the exact version, and `update` leaves an exact pin alone — to move off one, name the range or the version you want (`…@^0.3.0`, `…@0.3.1`); re-adding the bare name changes nothing, because the profile already satisfies it. A `github:` install records the tag or commit it resolved and does not move under `update` either — re-add the spec with the ref you want, `github:CJYLZS/dsh-browser#v0.3.1`. Restart the harness afterwards in every case.
+
+Earlier releases used the unscoped name `dsh-browser`, which on npm belongs to a different project. If your profile still records `dsh-browser` (in `package.json` or `dsh.profile.bundles`), remove it with `dsh plugin --profile web remove dsh-browser` before adding this one: the two are separate installs, and the old key is not what the commands above touch.
 
 ### Desktop
 
