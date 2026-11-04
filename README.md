@@ -52,27 +52,28 @@ Check the host dsh version first:
 dsh -V
 ```
 
-Then install with the `#<tag>` ref that version pairs with — a build targets one dsh generation, and a `github:` install without a ref takes the default branch HEAD, which drifts:
+The published package is `@cjylzs/dsh-browser`:
+
+```sh
+dsh plugin add --profile web @cjylzs/dsh-browser
+```
 
 | Your dsh | Plugin version | Install command |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.2.6 (latest) | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.6` |
+| ≥ 0.1.7-rc.1 | v0.3.x (latest) | `dsh plugin add --profile web @cjylzs/dsh-browser` |
+| ≥ 0.1.7-rc.1, from a tag | v0.2.x / v0.3.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.3.0` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
-For a dsh on the current generation, the latest release is:
+The registry install takes the latest published version; a `github:` install needs the `#<tag>` ref that version pairs with, because a `github:` install without a ref takes the default branch HEAD, which drifts. The built `lib/` is committed with each tag, so a tag install needs no build step either.
 
-```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.6
-```
-
-The built `lib/` is committed with each tag, so a tag install needs no build step. The profile's `package.json` records the ref you chose; to change versions, re-add with the new ref, and to remove the plugin use `dsh plugin remove --profile web dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
+The profile's `package.json` records what you installed; to change versions, re-add with the new spec, and to remove the plugin use `dsh plugin remove --profile web @cjylzs/dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
 
 ### Desktop
 
 The Desktop app owns its own profile, and the ordinary CLI refuses to manage `--profile desktop` on purpose, so install through the Desktop CLI that ships with the app:
 
 ```sh
-"<Desktop install dir>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.6
+"<Desktop install dir>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add @cjylzs/dsh-browser
 ```
 
 Use `<Desktop install dir>/resources/runtime/cli/bin/dsh` on macOS and Linux. Restart the app afterwards, the same way the Web profile restarts after `dsh plugin add`; the same `remove` verb uninstalls it.
@@ -202,7 +203,7 @@ Screenshots are written to a file, and the path comes back so it is durable in t
 - **Calls without a session are refused.** A scheduled job or a subagent with no session of its own fails the browser tools by design; attributing its calls to some other conversation's browser would be worse than the failure.
 - **Console history is per page and bounded.** `browser_console` keeps the last 200 entries of the current document (it says how many it dropped) and clears them when the page navigates: a message belongs to the document that produced it, the same way a ref does. Each message is clipped at 500 characters, and an argument that is an object is rendered from the protocol's own preview — enough for `{code: 500}`, not a deep dump.
 - **A screenshot can become an image block** when the composition mounts the attachment service and the calling model declares image input (`inline: true`); otherwise the file path is the answer, and asking for `inline` on a model that cannot read images is refused with that reason rather than silently ignored.
-- **Not published to npm.** Install from GitHub or a local checkout — see [Install](#install).
+- **Published as `@cjylzs/dsh-browser`.** The unscoped name `dsh-browser` on npm belongs to a different project, so it is not this one; install from the registry, a GitHub tag, or a local checkout — see [Install](#install).
 
 -----
 

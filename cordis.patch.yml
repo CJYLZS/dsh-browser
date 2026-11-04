@@ -10,4 +10,4 @@
 # renders pages inside the app while this one mirrors a separate process.
 - insert:
     - id: dsh-browser
-      name: 'dsh-browser'
+      name: '@cjylzs/dsh-browser'

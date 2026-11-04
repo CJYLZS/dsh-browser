@@ -52,27 +52,28 @@ Chrome 或 Edge 以独立进程运行，有自己的 profile、自己的 CDP 端
 dsh -V
 ```
 
-再按该版本对应的 `#<tag>` 引用安装——一份构建只针对一个 dsh 世代，而不带 ref 的 `github:` 安装会取默认分支的 HEAD，那个位置会漂：
+发布到 npm 的包名是 `@cjylzs/dsh-browser`：
+
+```sh
+dsh plugin add --profile web @cjylzs/dsh-browser
+```
 
 | 你的 dsh | 插件版本 | 安装命令 |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.2.6（最新） | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.6` |
+| ≥ 0.1.7-rc.1 | v0.3.x（最新） | `dsh plugin add --profile web @cjylzs/dsh-browser` |
+| ≥ 0.1.7-rc.1，按 tag 装 | v0.2.x / v0.3.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.3.0` |
 | 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
 
-属于当前世代的 dsh，装最新版就是这条：
+从 registry 安装取的是已发布的最新版本；从 GitHub 安装要写该版本对应的 `#<tag>`，因为不带 ref 的 `github:` 安装会取默认分支的 HEAD，那个位置会漂。构建产物 `lib/` 也随每个 tag 提交，所以按 tag 装不需要构建。
 
-```sh
-dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.2.6
-```
-
-构建产物 `lib/` 随每个 tag 提交，所以按 tag 安装不需要构建。profile 的 `package.json` 会记下你选的 ref；换版本就用新 ref 重新 add，移除插件用 `dsh plugin remove --profile web dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
+profile 的 `package.json` 会记下你装的是什么；换版本就用新 spec 重新 add，移除插件用 `dsh plugin remove --profile web @cjylzs/dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
 
 ### Desktop
 
 Desktop 应用自己拥有它的 profile，而普通 CLI 有意拒绝管理 `--profile desktop`，所以走随应用一起发布的 Desktop CLI：
 
 ```sh
-"<Desktop 安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add github:CJYLZS/dsh-browser#v0.2.6
+"<Desktop 安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add @cjylzs/dsh-browser
 ```
 
 macOS 与 Linux 用 `<Desktop 安装目录>/resources/runtime/cli/bin/dsh`。装完重启应用，和 Web profile 用 `dsh plugin add` 之后一样；卸载用同一个 `remove`。
@@ -202,7 +203,7 @@ macOS 与 Linux 用 `<Desktop 安装目录>/resources/runtime/cli/bin/dsh`。装
 - **没有会话的调用会被拒绝。** 定时任务或没有自己会话的子代理会按设计失败；把它的调用算到别的对话的浏览器上，比失败更糟。
 - **console 历史按页保存且有上限。** `browser_console` 保留当前文档最近 200 条（丢了多少会报出来），导航即清空：一条消息属于产生它的那份文档，和 ref 同一个道理。每条消息截到 500 字符，对象参数按协议自带的 preview 渲染——够看到 `{code: 500}`，不是深挖。
 - **截图可以变成图片内容块**：当组合挂载了附件服务、且调用方模型声明了 image 输入时（`inline: true`）；否则文件路径就是答案，而在读不了图的模型上要 `inline` 会被**明确拒绝并说明原因**，不会静默忽略。
-- **没有发布到 npm。** 从 GitHub 或本地检出安装——见[安装](#install)。
+- **发布名是 `@cjylzs/dsh-browser`。** npm 上那个不带 scope 的 `dsh-browser` 是另一个项目，不是本插件；可以从 registry、GitHub tag 或本地检出安装——见[安装](#install)。
 
 -----
 
