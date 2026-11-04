@@ -55,18 +55,18 @@ dsh -V
 发布到 npm 的包名是 `@cjylzs/dsh-browser`：
 
 ```sh
-dsh plugin add --profile web @cjylzs/dsh-browser
+dsh plugin --profile web add @cjylzs/dsh-browser
 ```
 
 | 你的 dsh | 插件版本 | 安装命令 |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.3.x（最新） | `dsh plugin add --profile web @cjylzs/dsh-browser` |
-| ≥ 0.1.7-rc.1，按 tag 装 | v0.2.x / v0.3.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.3.0` |
-| 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
+| ≥ 0.1.7-rc.1 | v0.3.x（最新） | `dsh plugin --profile web add @cjylzs/dsh-browser` |
+| ≥ 0.1.7-rc.1，按 tag 装 | v0.2.x / v0.3.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.3.0` |
+| 0.1.5-rc.2 | v0.1.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.1.0` |
 
 从 registry 安装取的是已发布的最新版本；从 GitHub 安装要写该版本对应的 `#<tag>`，因为不带 ref 的 `github:` 安装会取默认分支的 HEAD，那个位置会漂。构建产物 `lib/` 也随每个 tag 提交，所以按 tag 装不需要构建。
 
-profile 的 `package.json` 会记下你装的是什么；换版本就用新 spec 重新 add，移除插件用 `dsh plugin remove --profile web @cjylzs/dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
+profile 的 `package.json` 会记下你装的是什么；换版本就用新 spec 重新 add，移除插件用 `dsh plugin --profile web remove @cjylzs/dsh-browser`。装完都要重启 harness。机器上需要已安装 Chrome 或 Edge；`playwright-core` 是运行依赖，它自己不会下载浏览器。
 
 ### Desktop
 
@@ -76,7 +76,7 @@ Desktop 应用自己拥有它的 profile，而普通 CLI 有意拒绝管理 `--p
 "<Desktop 安装目录>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add @cjylzs/dsh-browser
 ```
 
-macOS 与 Linux 用 `<Desktop 安装目录>/resources/runtime/cli/bin/dsh`。装完重启应用，和 Web profile 用 `dsh plugin add` 之后一样；卸载用同一个 `remove`。
+macOS 与 Linux 用 `<Desktop 安装目录>/resources/runtime/cli/bin/dsh`。装完重启应用，和 Web profile 用 `dsh plugin --profile web add` 之后一样；卸载用同一个 `remove`。
 
 ### 从插件页安装
 
@@ -218,7 +218,7 @@ macOS 与 Linux 用 `<Desktop 安装目录>/resources/runtime/cli/bin/dsh`。装
 cd dsh-browser
 pnpm install          # 自包含 workspace；store 在 .pnpm-store/
 pnpm run build        # 产出 lib/index.js（host）与 lib/client.js（浏览器端）
-dsh plugin add --profile web link:/absolute/path/to/dsh-browser
+dsh plugin --profile web add link:/absolute/path/to/dsh-browser
 ```
 
 命令：`pnpm run build`（tsdown，两半都产出）、`pnpm run typecheck`、`pnpm test`，以及 `scripts/` 下的实测脚本（`prove.mjs` 验证 CDP 端口、screencast、输入派发与截图；`modes.mjs` 对照无头/带窗口/最小化；`cdp.mjs` 通过对外端口读写一台运行中的浏览器，用 `--port=` 指定某个会话的）。

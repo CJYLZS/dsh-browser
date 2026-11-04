@@ -55,18 +55,18 @@ dsh -V
 The published package is `@cjylzs/dsh-browser`:
 
 ```sh
-dsh plugin add --profile web @cjylzs/dsh-browser
+dsh plugin --profile web add @cjylzs/dsh-browser
 ```
 
 | Your dsh | Plugin version | Install command |
 | --- | --- | --- |
-| ≥ 0.1.7-rc.1 | v0.3.x (latest) | `dsh plugin add --profile web @cjylzs/dsh-browser` |
-| ≥ 0.1.7-rc.1, from a tag | v0.2.x / v0.3.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.3.0` |
-| 0.1.5-rc.2 | v0.1.x | `dsh plugin add --profile web github:CJYLZS/dsh-browser#v0.1.0` |
+| ≥ 0.1.7-rc.1 | v0.3.x (latest) | `dsh plugin --profile web add @cjylzs/dsh-browser` |
+| ≥ 0.1.7-rc.1, from a tag | v0.2.x / v0.3.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.3.0` |
+| 0.1.5-rc.2 | v0.1.x | `dsh plugin --profile web add github:CJYLZS/dsh-browser#v0.1.0` |
 
 The registry install takes the latest published version; a `github:` install needs the `#<tag>` ref that version pairs with, because a `github:` install without a ref takes the default branch HEAD, which drifts. The built `lib/` is committed with each tag, so a tag install needs no build step either.
 
-The profile's `package.json` records what you installed; to change versions, re-add with the new spec, and to remove the plugin use `dsh plugin remove --profile web @cjylzs/dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
+The profile's `package.json` records what you installed; to change versions, re-add with the new spec, and to remove the plugin use `dsh plugin --profile web remove @cjylzs/dsh-browser`. Restart the harness after installing. A Chrome or Edge installation is required; `playwright-core` is a dependency and downloads no browser of its own.
 
 ### Desktop
 
@@ -76,7 +76,7 @@ The Desktop app owns its own profile, and the ordinary CLI refuses to manage `--
 "<Desktop install dir>/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add @cjylzs/dsh-browser
 ```
 
-Use `<Desktop install dir>/resources/runtime/cli/bin/dsh` on macOS and Linux. Restart the app afterwards, the same way the Web profile restarts after `dsh plugin add`; the same `remove` verb uninstalls it.
+Use `<Desktop install dir>/resources/runtime/cli/bin/dsh` on macOS and Linux. Restart the app afterwards, the same way the Web profile restarts after `dsh plugin --profile web add`; the same `remove` verb uninstalls it.
 
 ### From the Plugins page
 
@@ -218,7 +218,7 @@ To run a local checkout instead of a tag, link it into the profile — later `pn
 cd dsh-browser
 pnpm install          # self-contained workspace; store lives in .pnpm-store/
 pnpm run build        # emits lib/index.js (host) and lib/client.js (browser)
-dsh plugin add --profile web link:/absolute/path/to/dsh-browser
+dsh plugin --profile web add link:/absolute/path/to/dsh-browser
 ```
 
 Commands: `pnpm run build` (tsdown, both halves), `pnpm run typecheck`, `pnpm test`, and the measurement rigs in `scripts/` (`prove.mjs` for the CDP port, screen cast, input dispatch, and screenshot; `modes.mjs` for headless/windowed/minimized; `cdp.mjs` to read or drive a running browser over its external port, with `--port=` to pick a session's).
