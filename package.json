@@ -1,6 +1,6 @@
 {
   "name": "@cjylzs/dsh-browser",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A real Chrome or Edge for the agent to work in, mirrored in the sidebar so you can watch and take over. One browser per conversation, with its own sign-ins.",
   "license": "MIT",
   "keywords": [
