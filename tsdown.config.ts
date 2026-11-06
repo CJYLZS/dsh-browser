@@ -12,9 +12,18 @@
  * `packages/client/web/src/platform.ts` — that list is the module table, and
  * a specifier outside it must be inlined or imported type-only).
  */
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'tsdown'
 
-const PLUGIN_ID = 'dsh-browser'
+/**
+ * The module id the harness keys this package's boot row by — the package name,
+ * read here rather than hand-copied, because a name that drifts from
+ * `package.json` loads as a script that registers nothing under the row's key.
+ * See `.agents/notes/implemented/bug-fix/2026-11-06-client-bundle-id-is-the-package-name.md`.
+ */
+const PLUGIN_ID = (JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+) as { name: string }).name
 
 /** Module-table entries the client bundle may require (the shell's platform baseline). */
 const CLIENT_EXTERNALS = [
